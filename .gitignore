@@ -1,0 +1,8 @@
+*.pkl
+*.zip
+*.npz
+*.pyc
+*.egg-info
+*.log
+setup.sh
+datasets/
