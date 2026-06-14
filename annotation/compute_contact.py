@@ -76,6 +76,7 @@ _NON_CONTACT_COLOR = np.array(
 )  # 비접촉 vertex 회색
 
 
+# MANO 모델(.pkl) 폴더 경로를 후보들 중에서 찾아 반환.
 def find_mano_root():
     # 후보 경로 중 MANO_LEFT.pkl이 실제로 있는 첫 폴더를 반환. 없으면 에러.
     for c in _MANO_ROOT_CANDIDATES:
@@ -84,6 +85,7 @@ def find_mano_root():
     raise FileNotFoundError("MANO models not found in: %s" % _MANO_ROOT_CANDIDATES)
 
 
+# MANO 파라미터로 손 mesh(카메라 좌표)와 vertex별 손가락 라벨을 만든다.
 def load_hand(sample, label):
     """Returns hand mesh (camera frame, meters) and per-vertex finger labels."""
     # pose_m: MANO 파라미터 (0:48 = global rot 3 + PCA pose 45, 48:51 = translation).
@@ -114,6 +116,7 @@ def load_hand(sample, label):
     return mesh, finger
 
 
+# 잡고 있는 YCB 물체 mesh를 pose로 변환해 카메라 좌표계에 배치한다.
 def load_object(sample, label, obj_file):
     """Returns the grasped object mesh posed in the camera frame."""
     # 샘플에 여러 물체가 있을 수 있으므로, 잡고 있는 물체의 인덱스를 고른다.
@@ -128,6 +131,7 @@ def load_object(sample, label, obj_file):
     return mesh, ycb_id
 
 
+# apriltag(테이블 기준)로부터 중력 방향을 카메라 좌표계 단위벡터로 구한다.
 def gravity_in_camera(sample, data_dir):
     """Unit gravity vector in this sample's camera frame.
 
@@ -156,6 +160,7 @@ def gravity_in_camera(sample, data_dir):
     return g_cam / np.linalg.norm(g_cam)  # 단위벡터로 정규화
 
 
+# mesh의 vertex별 면적(인접 face 면적의 1/3 합)을 계산한다.
 def vertex_areas(mesh):
     """Per-vertex area: 1/3 of the area of each incident face."""
     # 각 face 면적의 1/3을 그 face의 세 vertex에 분배(barycentric/voronoi 근사).
@@ -165,6 +170,7 @@ def vertex_areas(mesh):
     return va
 
 
+# 손 vertex의 물체 표면까지 signed distance와 접촉 마스크/최근접 face를 구한다.
 def detect_contact(hand_mesh, obj_mesh, thresh):
     """Signed distance of hand vertices to the object surface, contact mask,
     and the object face index closest to each hand vertex."""
@@ -187,10 +193,12 @@ def detect_contact(hand_mesh, obj_mesh, thresh):
     return sd, contact, tri_id, closest
 
 
+# 벡터를 단위벡터로 정규화하는 헬퍼.
 def unit(v):
     return v / np.linalg.norm(v)  # 벡터 정규화 헬퍼
 
 
+# 접촉 vertex를 손가락별로 묶어 cluster 대표값(n_k, area_k 등)을 계산 → SOCP 입력.
 def cluster_stats(hand_mesh, obj_mesh, finger, contact, sd, tri_id, g_cam, min_verts):
     # 접촉 vertex를 손가락 단위로 묶어 cluster별 대표값(normal/area 등)을 계산.
     va = vertex_areas(hand_mesh)
@@ -241,6 +249,7 @@ def cluster_stats(hand_mesh, obj_mesh, finger, contact, sd, tri_id, g_cam, min_v
     return clusters
 
 
+# eye에서 target을 바라보는 카메라 pose(4x4)를 만든다(렌더링용).
 def look_at(eye, target, up):
     # eye에서 target을 바라보는 4x4 카메라 pose 생성(렌더링용).
     z = unit(eye - target)  # pyrender camera looks along -z
@@ -251,6 +260,7 @@ def look_at(eye, target, up):
     return T
 
 
+# 접촉 여부/손가락별로 색칠한 렌더용 손 mesh를 생성한다.
 def make_hand_render_mesh(hand_mesh, finger, contact):
     # 손 mesh를 vertex color로 칠한 렌더용 mesh로 변환.
     colors = np.tile(_NON_CONTACT_COLOR, (len(hand_mesh.vertices), 1))  # 기본 회색
@@ -264,6 +274,7 @@ def make_hand_render_mesh(hand_mesh, finger, contact):
     return pyrender.Mesh.from_trimesh(m)
 
 
+# 카메라 시점 렌더를 실제 사진과 블렌딩한 정합 확인용 오버레이를 만든다.
 def render_overlay(sample, hand_rmesh, obj_mesh, w, h):
     """Camera-view render blended with the real image (pyrender flips y/z)."""
     # 라벨은 OpenCV 좌표(+y 아래, +z 앞), pyrender는 OpenGL 좌표 → y,z 부호 반전 필요.
@@ -287,6 +298,7 @@ def render_overlay(sample, hand_rmesh, obj_mesh, w, h):
     return im
 
 
+# 중력 기준 수평 궤도에서 손(+물체)을 여러 각도로 렌더한 이미지들을 반환한다.
 def render_orbit(
     sample, hand_rmesh, obj_mesh, g_cam, w, h, n_views=4, radius=0.45, with_object=True
 ):
@@ -331,6 +343,7 @@ def render_orbit(
     return ims
 
 
+# 전체 실행: 샘플 로드→mesh 구성→중력→접촉 검출→cluster→npz 저장→시각화.
 def main():
     # --- 인자 파싱 ---
     parser = argparse.ArgumentParser(
