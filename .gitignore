@@ -4,5 +4,6 @@
 *.pyc
 *.egg-info
 *.log
+*.png
 setup.sh
 datasets/
