@@ -121,9 +121,9 @@ def main():
   hand_mesh, finger = load_hand(sample, label)
   obj_mesh, ycb_id = load_object(sample, label, dataset.obj_file)
   g_cam = gravity_in_camera(sample, dataset.data_dir)
-  sd, contact, tri_id, _ = detect_contact(hand_mesh, obj_mesh, args.thresh)
+  sd, contact, tri_id, closest = detect_contact(hand_mesh, obj_mesh, args.thresh)
   clusters = cluster_stats(hand_mesh, obj_mesh, finger, contact, sd, tri_id,
-                           g_cam, args.min_verts)
+                           closest, g_cam, args.min_verts)
   print("%s, m=%.3f kg, mu=%.2f, %d contact clusters" %
         (dataset.ycb_classes[ycb_id], args.mass, args.mu, len(clusters)))
 
@@ -133,7 +133,7 @@ def main():
     t = friction_tangent(c["n_obj"], g_cam)
     if t is None:
       print("  [excluded] %s: n_k parallel to gravity (|n.g|=%.2f)" %
-            (c["finger"], abs(c["dot_g_obj"])))
+            (c["label"], abs(c["dot_g_obj"])))
       continue
     kept.append(c)
     normals.append(c["n_obj"])
@@ -157,14 +157,14 @@ def main():
   resid = (np.asarray(normals).T @ fn + np.asarray(tangents1).T @ ft1 +
            np.asarray(tangents2).T @ ft2 + args.mass * _GRAVITY * g_cam)
   print("force equilibrium residual: %.2e N" % np.linalg.norm(resid))
-  print("\n%-6s %8s %8s %8s %8s %10s %12s %10s" %
-        ("finger", "fn[N]", "ft1[N]", "ft2[N]", "|F|[N]", "area[cm2]",
+  print("\n%-7s %8s %8s %8s %8s %10s %12s %10s" %
+        ("patch", "fn[N]", "ft1[N]", "ft2[N]", "|F|[N]", "area[cm2]",
          "press[kPa]", "|ft|/mu*fn"))
   for c, fnk, f1k, f2k, pk in zip(kept, fn, ft1, ft2, pressures):
     fmag = np.sqrt(fnk**2 + f1k**2 + f2k**2)
     sat = np.hypot(f1k, f2k) / (args.mu * fnk) if fnk > 1e-9 else 0.0
-    print("%-6s %8.3f %8.3f %8.3f %8.3f %10.3f %12.2f %10.2f" %
-          (c["finger"], fnk, f1k, f2k, fmag, c["area_m2"] * 1e4, pk / 1000.0,
+    print("%-7s %8.3f %8.3f %8.3f %8.3f %10.3f %12.2f %10.2f" %
+          (c["label"], fnk, f1k, f2k, fmag, c["area_m2"] * 1e4, pk / 1000.0,
            sat))
   print("total normal force %.3f N, total friction %.3f N (weight %.3f N)" %
         (fn.sum(), ft_mag.sum(), args.mass * _GRAVITY))
@@ -180,6 +180,7 @@ def main():
       friction=args.friction,
       gravity_cam=g_cam,
       fingers=np.array([c["finger"] for c in kept]),
+      labels=np.array([c["label"] for c in kept]),
       normals=np.array(normals),
       tangents1=np.array(tangents1),
       tangents2=np.array(tangents2),
@@ -211,9 +212,9 @@ def main():
       0.0, 0.5, "\n".join(
           ["idx %d, m=%.3f kg, mu=%.2f, %s friction" %
            (args.idx, args.mass, args.mu, args.friction),
-           "%-7s %7s %7s %9s" % ("finger", "fn[N]", "|ft|[N]", "kPa")] +
+           "%-7s %7s %7s %9s" % ("patch", "fn[N]", "|ft|[N]", "kPa")] +
           ["%-7s %7.2f %7.2f %9.2f" %
-           (c["finger"], fnk, ftk, pk / 1000.0)
+           (c["label"], fnk, ftk, pk / 1000.0)
            for c, fnk, ftk, pk in zip(kept, fn, ft_mag, pressures)]),
       fontsize=9, family="monospace", va="center")
   sm = matplotlib.cm.ScalarMappable(

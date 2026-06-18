@@ -30,6 +30,8 @@ import torch
 import trimesh
 import trimesh.proximity
 import yaml
+from scipy.cluster.hierarchy import fcluster, linkage
+from scipy.spatial.distance import pdist
 
 from manopth.manolayer import ManoLayer
 
@@ -74,6 +76,23 @@ _FINGER_COLORS = np.array(
 _NON_CONTACT_COLOR = np.array(
     [190, 190, 190, 255], dtype=np.uint8
 )  # 비접촉 vertex 회색
+
+# 한 손가락이 두 개 이상의 물체 면에 걸쳐 닿을 때(예: 모서리를 감아쥠) cluster를
+# 나누는 normal 각도 임계값. 41개 cracker-box 시퀀스의 within-finger object-normal
+# spread 분포(analyze_normal_spread.py)가 single-face(~수°)와 multi-face(~70°)로
+# bimodal했고 그 골짜기가 ~30°라 이 값으로 정함. cracker box 기준이라 다른 물체에선
+# 재측정 필요.
+_SPLIT_ANGLE_DEG = 30.0
+
+# 최종 cluster(= finger × patch)별 시각화 색. 손가락당 patch가 여러 개일 수 있어
+# 손가락색 대신 cluster 인덱스로 구분되는 팔레트(tab20)를 쓴다.
+_CLUSTER_PALETTE = (np.array(plt.cm.tab20.colors) * 255).astype(np.uint8)
+
+
+# cluster 인덱스 → RGBA 색(uint8). 팔레트를 순환 사용.
+def cluster_color(ci):
+    rgb = _CLUSTER_PALETTE[ci % len(_CLUSTER_PALETTE)]
+    return np.array([rgb[0], rgb[1], rgb[2], 255], dtype=np.uint8)
 
 
 # MANO 모델(.pkl) 폴더 경로를 후보들 중에서 찾아 반환.
@@ -198,11 +217,74 @@ def unit(v):
     return v / np.linalg.norm(v)  # 벡터 정규화 헬퍼
 
 
-# 접촉 vertex를 손가락별로 묶어 cluster 대표값(n_k, area_k 등)을 계산 → SOCP 입력.
-def cluster_stats(hand_mesh, obj_mesh, finger, contact, sd, tri_id, g_cam, min_verts):
-    # 접촉 vertex를 손가락 단위로 묶어 cluster별 대표값(normal/area 등)을 계산.
+# 각 접촉 vertex의 '손→물체' 접촉 방향(단위벡터)을 최근접 표면점으로부터 구한다.
+def contact_directions(hand_vertices, obj_mesh, closest, sd, tri_id):
+    """Per-vertex hand->object contact direction from the nearest surface point.
+
+    This is the physical direction along which the hand presses the object:
+    (closest - hand_vertex), flipped for penetrating vertices so it always
+    points hand -> into object. On a flat face it equals the inward object
+    normal; near an edge it blends the two adjacent faces instead of snapping
+    to one (avoids the 90-deg flip of pure nearest-face normals). It is purely
+    geometric (object surface + hand position), so unlike the MANO hand vertex
+    normal it is not noisy, and unlike a fixed face-normal set it generalizes
+    to any object shape. Falls back to the object face normal where the hand
+    vertex sits essentially on the surface (direction degenerate).
+    """
+    raw = closest - hand_vertices  # 표면 쪽으로(=손 바깥면 기준 물체 방향)
+    # 관통(sd>0, 손이 물체 내부) vertex는 부호를 뒤집어 항상 손→물체를 가리키게.
+    raw = np.where((sd > 0)[:, None], -raw, raw)
+    norm = np.linalg.norm(raw, axis=1)
+    ok = norm > 1e-9
+    d = np.zeros_like(raw)
+    d[ok] = raw[ok] / norm[ok, None]
+    # 손 vertex가 표면 위에 거의 정확히 있어 방향이 정의 안 되면 face normal로 대체.
+    if (~ok).any():
+        d[~ok] = -obj_mesh.face_normals[tri_id[~ok]]
+    return d
+
+
+# 단위 normal 벡터 집합을 각도 임계값으로 묶어 patch 라벨(0..k-1)을 반환.
+def split_by_normal(normals, angle_deg):
+    """Agglomerative (average-linkage) clustering of unit normals by angle.
+
+    Two normals more than ~angle_deg apart end up in different patches; on a
+    box this separates contacts that wrap from one face onto a perpendicular
+    one. Returns one integer label per input normal.
+    """
+    n = len(normals)
+    if n <= 1:
+        return np.zeros(n, dtype=int)
+    # cosine distance = 1 - cos(theta); 평면 박스 면끼리는 ~1.0, 한 면 안은 ~0.
+    d = np.clip(pdist(normals, metric="cosine"), 0.0, 2.0)
+    if d.max() <= 1e-9:  # 모든 normal이 사실상 동일 → 단일 patch
+        return np.zeros(n, dtype=int)
+    Z = linkage(d, method="average")
+    thr = 1.0 - np.cos(np.radians(angle_deg))  # 각도 임계를 cosine-distance로 변환
+    return fcluster(Z, t=thr, criterion="distance") - 1
+
+
+# 접촉 vertex를 (손가락 × contact-direction patch)로 묶어 cluster 대표값을 계산.
+def cluster_stats(
+    hand_mesh,
+    obj_mesh,
+    finger,
+    contact,
+    sd,
+    tri_id,
+    closest,
+    g_cam,
+    min_verts,
+    split_angle=_SPLIT_ANGLE_DEG,
+):
+    # 각 손가락의 접촉 vertex를 '손→물체 접촉 방향'(contact_directions) 기준으로
+    # patch 단위로 쪼갠다. 한 손가락이 두 면에 걸치면 방향을 평균낼 때 엉뚱한 값이
+    # 나오므로(예전 idx 3752 little-finger singularity) patch별로 나눠 따로 잡는다.
     va = vertex_areas(hand_mesh)
     hand_normals = np.asarray(hand_mesh.vertex_normals)
+    # 각 vertex의 손→물체 접촉 방향(=force 방향). 평평한 면에선 inward normal과
+    # 같고 edge에선 blend됨. nearest-face normal의 90도 스냅 artifact를 피한다.
+    d_all = contact_directions(hand_mesh.vertices, obj_mesh, closest, sd, tri_id)
     clusters = []
     for fi, fname in enumerate(_FINGER_NAMES):
         # 이 손가락(fi)이면서 접촉 상태인 vertex 인덱스만 선택.
@@ -215,37 +297,51 @@ def cluster_stats(hand_mesh, obj_mesh, finger, contact, sd, tri_id, g_cam, min_v
                     % (fname, len(sel), min_verts)
                 )
             continue
-        area = va[sel].sum()  # cluster 접촉 면적 = 소속 vertex area 합
-        # n_k points from the hand into the object.
-        # [두 가지 normal] 둘 다 '손→물체' 방향으로 통일.
-        #   n_hand: 손 vertex normal 평균 (손가락 패드 곡면이라 noisy)
-        #   n_obj : 최근접 물체 face의 바깥 normal에 -부호 (평평한 면에서 안정적)
-        #   → 다운스트림 SOCP는 n_obj를 사용(Research context 문제 #3).
-        n_hand = unit(hand_normals[sel].mean(axis=0))
-        n_obj = unit(-obj_mesh.face_normals[tri_id[sel]].mean(axis=0))
-        clusters.append(
-            {
-                "finger": fname,
-                "finger_id": fi,
-                "verts": sel,
-                "n_verts": len(sel),
-                "area_m2": area,
-                "n_hand": n_hand,
-                "n_obj": n_obj,
-                # 두 normal이 얼마나 벌어졌는지(품질 진단용).
-                "angle_hand_obj_deg": np.degrees(
-                    np.arccos(np.clip(n_hand @ n_obj, -1, 1))
-                ),
-                # n_k·ĝ ≈ 0 이면 normal이 중력에 수직 → 현재 simplification 성립.
-                "dot_g_hand": n_hand @ g_cam,
-                "dot_g_obj": n_obj @ g_cam,
-                "max_penetration_mm": sd[sel].max()
-                * 1000.0,  # 최대 관통 깊이(annotation 품질)
-                "centroid": hand_mesh.vertices[sel].mean(
-                    axis=0
-                ),  # cluster 중심(torque용 r_k 후보)
-            }
-        )
+        # contact direction으로 patch 분할 후, vertex가 적은 patch는 stray로 drop.
+        labels = split_by_normal(d_all[sel], split_angle)
+        patch_id = 0
+        for p in range(labels.max() + 1):
+            grp = sel[labels == p]
+            if len(grp) < min_verts:
+                if len(grp) > 0:
+                    print(
+                        "  [skip] %-6s patch: only %d vertices (< %d), likely stray"
+                        % (fname, len(grp), min_verts)
+                    )
+                continue
+            area = va[grp].sum()  # patch 접촉 면적 = 소속 vertex area 합
+            # n_k points from the hand into the object.
+            #   n_hand: 손 vertex normal 평균 (손가락 패드 곡면이라 noisy, 진단용)
+            #   n_obj : 손→물체 contact direction 평균 (force 방향, SOCP가 사용)
+            n_hand = unit(hand_normals[grp].mean(axis=0))
+            n_obj = unit(d_all[grp].mean(axis=0))
+            clusters.append(
+                {
+                    "finger": fname,
+                    "finger_id": fi,
+                    "patch_id": patch_id,
+                    # 손가락당 patch가 여러 개일 수 있어 고유 라벨을 둔다(예: "ring0").
+                    "label": "%s%d" % (fname, patch_id),
+                    "verts": grp,
+                    "n_verts": len(grp),
+                    "area_m2": area,
+                    "n_hand": n_hand,
+                    "n_obj": n_obj,
+                    # 두 normal이 얼마나 벌어졌는지(품질 진단용).
+                    "angle_hand_obj_deg": np.degrees(
+                        np.arccos(np.clip(n_hand @ n_obj, -1, 1))
+                    ),
+                    # n_k·ĝ ≈ 0 이면 normal이 중력에 수직 → 현재 simplification 성립.
+                    "dot_g_hand": n_hand @ g_cam,
+                    "dot_g_obj": n_obj @ g_cam,
+                    "max_penetration_mm": sd[grp].max()
+                    * 1000.0,  # 최대 관통 깊이(annotation 품질)
+                    "centroid": hand_mesh.vertices[grp].mean(
+                        axis=0
+                    ),  # cluster 중심(torque용 r_k 후보)
+                }
+            )
+            patch_id += 1
     return clusters
 
 
@@ -260,11 +356,12 @@ def look_at(eye, target, up):
     return T
 
 
-# 접촉 여부/손가락별로 색칠한 렌더용 손 mesh를 생성한다.
-def make_hand_render_mesh(hand_mesh, finger, contact):
-    # 손 mesh를 vertex color로 칠한 렌더용 mesh로 변환.
+# cluster(= finger × patch)별로 색칠한 렌더용 손 mesh를 생성한다.
+def make_hand_render_mesh(hand_mesh, clusters):
+    # 비접촉은 회색, 각 cluster의 vertex는 cluster 인덱스 색으로 칠한다.
     colors = np.tile(_NON_CONTACT_COLOR, (len(hand_mesh.vertices), 1))  # 기본 회색
-    colors[contact] = _FINGER_COLORS[finger[contact]]  # 접촉 vertex만 손가락 색
+    for ci, c in enumerate(clusters):
+        colors[c["verts"]] = cluster_color(ci)
     m = trimesh.Trimesh(
         vertices=hand_mesh.vertices.copy(),
         faces=hand_mesh.faces.copy(),
@@ -274,8 +371,37 @@ def make_hand_render_mesh(hand_mesh, finger, contact):
     return pyrender.Mesh.from_trimesh(m)
 
 
+# start에서 direction 방향으로 향하는 화살표 mesh(shaft+head)를 만든다.
+def make_arrow(start, direction, color, length=0.05, shaft_radius=0.0018):
+    """Arrow trimesh from `start` along `direction`, colored `color` (RGBA)."""
+    d = unit(np.asarray(direction, dtype=np.float64))
+    head_len = min(0.018, 0.4 * length)
+    shaft_len = max(length - head_len, 1e-4)
+    shaft = trimesh.creation.cylinder(radius=shaft_radius, height=shaft_len,
+                                      sections=12)
+    shaft.apply_translation([0, 0, shaft_len / 2.0])  # base를 원점에
+    head = trimesh.creation.cone(radius=shaft_radius * 2.6, height=head_len,
+                                 sections=12)
+    head.apply_translation([0, 0, shaft_len])
+    arrow = trimesh.util.concatenate([shaft, head])  # +z 방향 화살표
+    arrow.apply_transform(trimesh.geometry.align_vectors([0, 0, 1], d))  # +z→d
+    arrow.apply_translation(np.asarray(start, dtype=np.float64))
+    arrow.visual.vertex_colors = np.asarray(color, dtype=np.uint8)
+    return arrow
+
+
+# cluster별 대표 normal(n_obj)을 centroid에서 시작하는 화살표 pyrender mesh로 만든다.
+def cluster_arrows(clusters, colors, length=0.05):
+    # n_obj는 '손→물체' 방향이므로 화살표가 손에서 물체 쪽으로 향한다(검증용).
+    arrows = []
+    for c, col in zip(clusters, colors):
+        a = make_arrow(c["centroid"], c["n_obj"], col, length)
+        arrows.append(pyrender.Mesh.from_trimesh(a, smooth=False))
+    return arrows
+
+
 # 카메라 시점 렌더를 실제 사진과 블렌딩한 정합 확인용 오버레이를 만든다.
-def render_overlay(sample, hand_rmesh, obj_mesh, w, h):
+def render_overlay(sample, hand_rmesh, obj_mesh, w, h, extra_meshes=None):
     """Camera-view render blended with the real image (pyrender flips y/z)."""
     # 라벨은 OpenCV 좌표(+y 아래, +z 앞), pyrender는 OpenGL 좌표 → y,z 부호 반전 필요.
     flip = np.diag([1.0, -1.0, -1.0, 1.0])
@@ -287,6 +413,8 @@ def render_overlay(sample, hand_rmesh, obj_mesh, w, h):
     scene.add(hand_rmesh, pose=flip)
     obj_r = pyrender.Mesh.from_trimesh(obj_mesh.copy())
     scene.add(obj_r, pose=flip)
+    for m in extra_meshes or []:  # 화살표 등은 손/물체와 같은 flip 적용
+        scene.add(m, pose=flip)
     r = pyrender.OffscreenRenderer(viewport_width=w, viewport_height=h)
     im_render, _ = r.render(scene)
     r.delete()
@@ -300,7 +428,16 @@ def render_overlay(sample, hand_rmesh, obj_mesh, w, h):
 
 # 중력 기준 수평 궤도에서 손(+물체)을 여러 각도로 렌더한 이미지들을 반환한다.
 def render_orbit(
-    sample, hand_rmesh, obj_mesh, g_cam, w, h, n_views=4, radius=0.45, with_object=True
+    sample,
+    hand_rmesh,
+    obj_mesh,
+    g_cam,
+    w,
+    h,
+    n_views=4,
+    radius=0.45,
+    with_object=True,
+    extra_meshes=None,
 ):
     """Renders the contact-colored hand from cameras orbiting the object,
     with 'up' anti-parallel to gravity."""
@@ -337,6 +474,8 @@ def render_orbit(
         scene.add(hand_rmesh)
         if with_object:
             scene.add(obj_gray)
+        for m in extra_meshes or []:  # 화살표는 카메라 좌표 그대로(flip 없음)
+            scene.add(m)
         im, _ = r.render(scene)
         ims.append(im)
     r.delete()
@@ -360,7 +499,13 @@ def main():
         "--min_verts",
         type=int,
         default=3,
-        help="min contact vertices per finger cluster",
+        help="min contact vertices per cluster (also drops stray sub-patches)",
+    )
+    parser.add_argument(
+        "--split_angle",
+        type=float,
+        default=_SPLIT_ANGLE_DEG,
+        help="within-finger normal angle [deg] above which contacts split into patches",
     )
     parser.add_argument("--out_dir", default=_DEFAULT_OUT_DIR)
     args = parser.parse_args()
@@ -384,7 +529,7 @@ def main():
     print("gravity in camera frame: [%+.4f %+.4f %+.4f]" % tuple(g_cam))
 
     # --- 접촉 검출 + threshold별 민감도 출력 ---
-    sd, contact, tri_id, _ = detect_contact(hand_mesh, obj_mesh, args.thresh)
+    sd, contact, tri_id, closest = detect_contact(hand_mesh, obj_mesh, args.thresh)
     for t in (0.0025, 0.005, 0.010):
         print(
             "  threshold %4.1f mm -> %3d contact vertices" % (t * 1000, (sd > -t).sum())
@@ -394,14 +539,24 @@ def main():
         % (args.thresh * 1000, contact.sum(), sd.max() * 1000)
     )
 
-    # --- 손가락별 cluster 통계 계산 + 표 출력 ---
+    # --- (손가락 × patch) cluster 통계 계산 + 표 출력 ---
     clusters = cluster_stats(
-        hand_mesh, obj_mesh, finger, contact, sd, tri_id, g_cam, args.min_verts
+        hand_mesh,
+        obj_mesh,
+        finger,
+        contact,
+        sd,
+        tri_id,
+        closest,
+        g_cam,
+        args.min_verts,
+        args.split_angle,
     )
+    print("split angle %.0f deg -> %d clusters" % (args.split_angle, len(clusters)))
     print(
-        "\n%-6s %6s %10s   %-26s %-26s %6s %8s %8s %8s"
+        "\n%-7s %6s %10s   %-26s %-26s %6s %8s %8s %8s"
         % (
-            "finger",
+            "patch",
             "nverts",
             "area[cm2]",
             "n_k(hand)",
@@ -414,10 +569,10 @@ def main():
     )
     for c in clusters:
         print(
-            "%-6s %6d %10.3f   [%+.3f %+.3f %+.3f]     [%+.3f %+.3f %+.3f]"
+            "%-7s %6d %10.3f   [%+.3f %+.3f %+.3f]     [%+.3f %+.3f %+.3f]"
             "     %6.1f %+8.3f %+8.3f %8.2f"
             % (
-                (c["finger"], c["n_verts"], c["area_m2"] * 1e4)
+                (c["label"], c["n_verts"], c["area_m2"] * 1e4)
                 + tuple(c["n_hand"])
                 + tuple(c["n_obj"])
                 + (
@@ -436,10 +591,13 @@ def main():
         idx=args.idx,
         thresh=args.thresh,
         gravity_cam=g_cam,
+        split_angle=args.split_angle,
         signed_distance=sd,
         contact_mask=contact,
         finger_label=finger,
         cluster_fingers=np.array([c["finger"] for c in clusters]),
+        cluster_patch=np.array([c["patch_id"] for c in clusters]),
+        cluster_labels=np.array([c["label"] for c in clusters]),
         cluster_n_verts=np.array([c["n_verts"] for c in clusters]),
         cluster_area_m2=np.array([c["area_m2"] for c in clusters]),
         cluster_n_hand=np.array([c["n_hand"] for c in clusters]),
@@ -450,11 +608,24 @@ def main():
     )
 
     # --- 시각화: 카메라뷰 오버레이 + 궤도뷰(물체 포함/미포함) ---
-    hand_rmesh = make_hand_render_mesh(hand_mesh, finger, contact)
-    im_overlay = render_overlay(sample, hand_rmesh, obj_mesh, dataset.w, dataset.h)
-    ims_orbit = render_orbit(sample, hand_rmesh, obj_mesh, g_cam, dataset.w, dataset.h)
+    hand_rmesh = make_hand_render_mesh(hand_mesh, clusters)
+    # cluster별 contact-direction normal을 화살표로(색은 cluster 색과 일치).
+    arrows = cluster_arrows(clusters, [cluster_color(ci) for ci in range(len(clusters))])
+    im_overlay = render_overlay(
+        sample, hand_rmesh, obj_mesh, dataset.w, dataset.h, extra_meshes=arrows
+    )
+    ims_orbit = render_orbit(
+        sample, hand_rmesh, obj_mesh, g_cam, dataset.w, dataset.h, extra_meshes=arrows
+    )
     ims_hand = render_orbit(
-        sample, hand_rmesh, obj_mesh, g_cam, dataset.w, dataset.h, with_object=False
+        sample,
+        hand_rmesh,
+        obj_mesh,
+        g_cam,
+        dataset.w,
+        dataset.h,
+        with_object=False,
+        extra_meshes=arrows,
     )
 
     # 3x4 grid: [0]행 = 오버레이/통계표/범례, [1]행 = 궤도뷰, [2]행 = 손만 궤도뷰.
@@ -468,12 +639,13 @@ def main():
         0.5,
         "\n".join(
             [
-                "idx %d, thresh %.1f mm" % (args.idx, args.thresh * 1000),
-                "%-7s %7s %7s %7s" % ("finger", "nverts", "cm2", "n.g"),
+                "idx %d, thresh %.1f mm, split %.0f deg"
+                % (args.idx, args.thresh * 1000, args.split_angle),
+                "%-7s %7s %7s %7s" % ("patch", "nverts", "cm2", "n.g"),
             ]
             + [
                 "%-7s %7d %7.2f %+7.2f"
-                % (c["finger"], c["n_verts"], c["area_m2"] * 1e4, c["dot_g_obj"])
+                % (c["label"], c["n_verts"], c["area_m2"] * 1e4, c["dot_g_obj"])
                 for c in clusters
             ]
         ),
@@ -482,13 +654,17 @@ def main():
         va="center",
     )
     axes[0, 2].axis("off")
-    # 손가락 색 범례.
+    # cluster(= patch) 색 범례.
     handles = [
-        plt.Rectangle((0, 0), 1, 1, color=_FINGER_COLORS[fi, :3] / 255.0)
-        for fi in range(len(_FINGER_NAMES))
+        plt.Rectangle((0, 0), 1, 1, color=cluster_color(ci)[:3] / 255.0)
+        for ci in range(len(clusters))
     ] + [plt.Rectangle((0, 0), 1, 1, color=_NON_CONTACT_COLOR[:3] / 255.0)]
     axes[0, 2].legend(
-        handles, _FINGER_NAMES + ["no contact"], loc="center", fontsize=9, frameon=False
+        handles,
+        [c["label"] for c in clusters] + ["no contact"],
+        loc="center",
+        fontsize=9,
+        frameon=False,
     )
     axes[0, 3].axis("off")
     for i, im in enumerate(ims_orbit):

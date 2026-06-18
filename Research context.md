@@ -1,14 +1,16 @@
 # Research Context — Hand-Object Pressure Pseudo-Labeling
 
-**업데이트:** 2026-06-12
+**업데이트:** 2026-06-18
 
-> Research Plan.txt의 "검증 계획: Simplest Case" 진행 기록. 이 문서는 나중에 다시 봐도 바로 이어서 작업할 수 있도록 진행 상황 / 발견한 문제 / 코드 구성 / 실행법을 기록한다.
+> Research Plan.md의 "검증 계획: Simplest Case" 진행 기록. 이 문서는 나중에 다시 봐도 바로 이어서 작업할 수 있도록 진행 상황 / 발견한 문제 / 코드 구성 / 실행법을 기록한다.
 
 ---
 
 ## 1. 한 줄 요약
 
 DexYCB cracker box scene(idx 421470)에서 proximity 기반 contact 추출과 min-effort SOCP(torque 제외)까지 구현·검증 완료. force 추정치는 계획서 기대치와 일치 (엄지 ~4.4N / 손가락 ~0.8-1.5N). 단, 계획서의 1D friction formulation은 best-case scene에서도 infeasible임을 확인 → 2D friction(full cone)으로 해결. 모든 코드는 `annotation/` 폴더에 있음 (dex-ycb-toolkit 내부에서 작업하지 않기로 함).
+
+**(2026-06-18 갱신)** contact clustering을 "손가락 단위"에서 **"손가락 × normal-patch"** 로 정교화: 한 손가락이 두 면에 걸치면(예: 모서리 감아쥠) normal을 평균낼 때 엉뚱한 방향이 나오므로 patch별로 분리. 대표 normal n_k도 nearest-face normal 대신 **contact direction(손 vertex→가장 가까운 물체 표면점 방향)의 평균**으로 변경 — 물리적 force 방향이고 임의 물체에 일반화되며 noise가 적음(문제 #3, #7). 분할 임계각 30°는 41개 cracker scene의 within-finger normal spread 분포(bimodal, 골짜기 ~30°)로 결정. 화살표 시각화·검증 비디오 추가. pressure research 전용 conda env `pressure` 신설.
 
 ---
 
@@ -41,12 +43,25 @@ DexYCB cracker box scene(idx 421470)에서 proximity 기반 contact 추출과 mi
 - n_k는 object mesh 기준 사용 (아래 문제 #3).
 - 결과는 아래 문제 #4, #5 참고.
 
+### [Step 1.6] within-finger normal-patch 분할 + contact-direction normal (2026-06-18, 완료)
+
+지금까지 한 손가락 = cluster 1개였는데, 한 손가락이 서로 다른 면에 동시에 닿는 경우(모서리 감아쥠, 윗면+옆면 등)를 분리하도록 cluster 단위를 세분화했다.
+
+- **분할 임계각 결정 (analyze_normal_spread.py):** 41개 cracker scene을 스캔해 손가락별 접촉 vertex의 normal이 손가락 평균에서 벌어진 각도 분포를 측정. per-vertex / per-finger MAX / per-finger P90 세 분포 모두 **bimodal**(single-face ~수° vs multi-face ~70°), 골짜기가 ~30°. → **분할 임계각 30°** 확정. P90 기준 약 42%의 손가락 접촉이 multi-patch(>30°)라 분할이 예외가 아니라 흔함. (MAX는 stray vertex 1~2개에도 민감 → P90이 robust한 판정자.)
+- **분할 방식 (compute_contact.split_by_normal):** 손가락 내에서 contact-direction 벡터를 average-linkage(cosine)로 군집화, 30° 초과 시 patch 분리. vertex 3개 미만 sub-cluster는 stray로 **drop**(보수적 outlier 제거; merge 안 함).
+- **대표 normal을 contact direction으로 변경 (문제 #3 갱신, #7):** n_k = 각 vertex의 `closest_point − hand_vertex`(관통 시 부호 반전; 손→물체 방향) 벡터를 군집 평균낸 것. 평평한 면에선 inward normal과 동일, edge에선 두 면 사이로 blend(nearest-face normal의 90° 스냅 artifact 완화). 순수 기하라 MANO normal보다 noise 적고, face-normal 후보 enumerate 없이 임의 물체에 일반화됨. **군집화·대표값 모두 이 contact direction으로 통일.**
+- **검증:** idx 3752(over-edge)는 옆면 patch(n·g≈0.09)와 윗면 patch(n·g≈0.99)로 정확히 분리(예전 little-finger singularity 해소). idx 421470(flat side grip)은 수직 모서리를 감은 부분만 분리. SOCP도 분할 cluster로 optimal(residual ~1e-11) 유지. 분포는 contact-direction으로 재측정해도 거의 동일(30° robust).
+- **화살표 시각화 (make_arrow/cluster_arrows):** cluster centroid에서 n_k 방향 화살표를 cluster 색과 동일하게 렌더 → "손→물체로 향하는지" 직접 검증. `compute_contact.py --idx`의 정적 figure와 비디오 모두 포함.
+- **검증 비디오 (render_contact_video.py):** 41개 cracker 시퀀스를 좌(카메라 오버레이)/우(중력 기준 turntable, 화살표 포함) 2-패널로 렌더한 mp4. 연속 프레임에서 같은 patch가 같은 색을 유지하도록 ColorTracker(finger_id+normal 각도 매칭). caption은 작은 폰트·좌측 정렬·줄당 5개 wrap.
+
 ### [다음 단계] (미착수)
 
 - torque equilibrium 추가.
 - 1D friction을 공식 formulation에서 유지할지 결정 필요 (문제 #4).
 - cracker box 전체 scene으로 확장, infeasibility rate 측정.
 - contact area 정의(threshold)에 따른 pressure 스케일 보정 검토 (문제 #5).
+- edge-graze patch(문제 #7)를 force 단계에서 어떻게 다룰지 (현재는 분리만; grazing contact의 spurious force 가능성). `ang(hand,obj)` 진단 지표로 모니터링 중.
+- 다른 object로 확장 시 분할 임계각 30° 재측정 (현재는 cracker box 기준).
 
 ---
 
@@ -64,10 +79,11 @@ DexYCB cracker box scene(idx 421470)에서 proximity 기반 contact 추출과 mi
 - 5mm 기준 손가락당 area 2~18.5 cm² — 계획서가 pressure 기대치(40/13 kPa) 계산에 깔았던 ~1 cm²(fingertip만)보다 훨씬 큼.
 - 손가락이 박스 면에 감기면 fingertip뿐 아니라 중간 마디도 contact에 포함됨(idx 421470의 index: 18.5 cm², tip 비율 0.84).
 
-### 문제 #3. n_k를 hand 기준 vs object 기준 — object 기준으로 결정
+### 문제 #3. n_k 정의 — (1차) object 기준 → (2차, 2026-06-18) contact direction
 
-- 계획서에서 "구현 단계에서 확인 필요"라고 했던 부분.
-- 두 normal이 3~55°까지 벌어짐. hand mesh 기준은 손가락 패드 곡면의 평균이라 기울어지고 noisy함. 박스처럼 평평한 면에서는 object mesh 기준이 훨씬 안정적 → object 기준 n_k 사용 (n_k = -object outward normal, 즉 손→물체 방향).
+- 계획서에서 "구현 단계에서 확인 필요"라고 했던 부분. **해결됨.**
+- (1차 결정) hand mesh vertex normal은 손가락 패드 곡면 평균이라 noisy하고 object normal과 3~55° 벌어짐 → object mesh 기준 채택.
+- (2차 결정, 문제 #7 때문) nearest-face normal은 edge에서 가장 가까운 면으로 90° 스냅되는 artifact가 있음. → **n_k = contact direction**(각 vertex의 `closest_point − hand_vertex` 방향, 관continued penetration 부호 반전, 군집 평균)으로 변경. 평면에선 inward object normal과 동일하지만 edge에선 두 면 사이로 blend되고, 순수 기하라 noise가 적으며 임의 물체에 일반화됨. 군집화 기준도 이 벡터로 통일. (compute_contact.contact_directions / split_by_normal / cluster_stats)
 
 ### 문제 #4. ★가장 중요★ 1D friction은 best-case scene에서도 INFEASIBLE
 
@@ -99,18 +115,28 @@ DexYCB cracker box scene(idx 421470)에서 proximity 기반 contact 추출과 mi
 - hand-object 관통이 흔함 (idx 421470은 최대 5mm, idx 188216은 12mm).
 - 관통도 contact로 처리(signed distance > -threshold)하고 있음.
 
+### 문제 #7. edge-graze artifact — nearest-face normal의 90° 스냅 (2026-06-18)
+
+- 손을 곧게 펴 앞/뒷면을 잡았는데 손가락 옆구리가 옸면 모서리에 스치면, 그 vertex들이 "가장 가까운 면 = 옆면"으로 잡혀 옆면 normal(90° 꺾인)을 받음. 실제론 옆면을 누르는 게 아니라 앞면을 누르는 중이라 normal이 잘못됨.
+- 판별자: `ang(hand_normal, n_k)`. 진짜 conform이면 hand normal도 같이 꺾여 불일치 작음(~수십°), 우연한 graze면 hand normal은 앞면 그대로라 불일치 ~90°. 검증 scene에서 graze로 의심되는 patch들이 실제로 불일치 57~77°로 튐.
+- (부분) 해결: n_k를 contact direction으로 바꿔 edge에서 90° 스냅 대신 blend(문제 #3). 단 진짜로 옆면에 가장 가까운 vertex는 여전히 옆면을 가리키므로, grazing patch가 force 단계에서 spurious force를 받을 가능성은 남음 → 다음 단계 과제, `ang` 지표로 모니터링.
+- 일반화 고려로 "면 normal 후보 enumerate 후 hand normal로 면 선택" 방식은 채택 안 함(둥근/복잡한 물체엔 면 목록이 없음). object별 hard cutoff도 피함.
+
 ---
 
 ## 4. 코드 구성 (annotation/ 폴더)
 
 ```
 annotation/
-├── compute_contact.py      # [Step 1] contact 추출 + cluster + 시각화
-├── scan_contact_scenes.py  # [Step 1.5] 전체 scene 스캔/랭킹
-├── solve_pressure.py       # [Step 2] min-effort SOCP → pressure + 시각화
+├── compute_contact.py        # [Step 1] contact 추출 + cluster(손가락×patch) + 화살표 시각화
+├── scan_contact_scenes.py    # [Step 1.5] 전체 scene 스캔/랭킹
+├── analyze_normal_spread.py  # [Step 1.6] within-finger normal spread 분포(분할 임계각 결정)
+├── render_contact_video.py   # [Step 1.6] 30° 클러스터링+화살표 검증 비디오(turntable)
+├── solve_pressure.py         # [Step 2] min-effort SOCP → pressure + 시각화
 └── vis/
-    ├── contact/            # contact_<idx>.png (시각화), contact_<idx>.npz,
-    │                       # scan_results.npz (스캔 랭킹 47개)
+    ├── contact/            # contact_<idx>.png (화살표 포함 figure), contact_<idx>.npz,
+    │                       # scan_results.npz, normal_spread.{png,npz},
+    │                       # contact_clusters.mp4 (검증 비디오)
     └── pressure/           # pressure_<idx>_<1d|2d>.png / .npz
 ```
 
@@ -119,10 +145,13 @@ annotation/
 - **load_hand(sample, label):** MANO mesh(778 verts, 카메라 좌표, m 단위)와 vertex별 손가락 라벨(skinning weight argmax; MANO part 순서는 wrist/index/middle/little/ring/thumb 주의 — 파일 상단 주석 참고).
 - **load_object(...):** 잡은 YCB object mesh를 pose_y로 변환해 카메라 좌표로.
 - **gravity_in_camera(...):** apriltag extrinsics에서 중력 단위벡터를 카메라 frame으로. (calibration/extrinsics_<id>/extrinsics.yml의 'apriltag' 항목 z축이 테이블 위쪽.)
-- **detect_contact(...):** trimesh ProximityQuery로 hand vertex의 signed distance (closest face normal 부호 판정이라 non-watertight mesh OK). contact = sd > -threshold (관통 포함).
-- **cluster_stats(...):** 손가락별 cluster의 n_k(hand/object), area_k (vertex당 인접 face 면적의 1/3 합), n·g, 관통 깊이.
-- **render_overlay / render_orbit:** pyrender EGL 렌더. orbit은 중력 기준 수직 up으로 4방향. 출력 figure는 3x4 grid (overlay+통계 / orbit / hand-only).
-- npz에는 SOCP에 필요한 모든 값 저장 (cluster normals/areas/centroids, gravity, hand verts, object center).
+- **detect_contact(...):** trimesh ProximityQuery로 hand vertex의 signed distance + **closest point** (closest face normal 부호 판정이라 non-watertight mesh OK). contact = sd > -threshold (관통 포함).
+- **contact_directions(...):** 각 접촉 vertex의 손→물체 방향(`closest − hand_vertex`, 관통 부호 반전, 퇴화 시 face normal fallback). n_k와 군집화의 기준 벡터.
+- **split_by_normal(vectors, angle):** average-linkage(cosine) 군집화로 angle(기본 30°) 초과 시 분리, patch 라벨 반환.
+- **cluster_stats(...):** 손가락별로 contact direction을 split_by_normal로 patch 분할(stray <min_verts drop) → patch별 n_k(=contact direction 평균), area_k, n·g, hand normal과의 불일치각(graze 진단), centroid. 한 손가락에서 여러 cluster 가능(label 예: "ring0","ring1").
+- **make_arrow / cluster_arrows:** cluster centroid에서 n_k 방향 화살표 mesh(색=cluster 색).
+- **render_overlay / render_orbit:** pyrender EGL 렌더, `extra_meshes`로 화살표 추가. orbit은 중력 기준 수직 up으로 4방향. 출력 figure는 3x4 grid (overlay+통계 / orbit / hand-only).
+- npz에는 SOCP에 필요한 모든 값 저장 (cluster normals/areas/centroids, patch 라벨, gravity, hand verts, object center).
 
 ### scan_contact_scenes.py
 
@@ -130,6 +159,17 @@ annotation/
 - 빠른 prefilter(라벨만 사용): 박스 수직(|장축·(-g)|>0.95), 들림(frame 0 대비 +3cm), 손 존재 → 통과한 frame만 contact 계산.
 - 속도 최적화: hand vertex를 object canonical frame으로 역변환해서 ProximityQuery를 한 번만 빌드. 41개 시퀀스 전체 ~26초.
 - 통과 기준: thumb 포함 cluster ≥ 4개. worst |n_obj·g| 오름차순 랭킹 출력, vis/contact/scan_results.npz에 저장.
+
+### analyze_normal_spread.py
+
+- 41개 cracker 시퀀스(stride 4, prefilter 없음 — messy grip 포함)에서 손가락별 접촉 vertex의 contact direction이 손가락 평균에서 벌어진 각도를 수집.
+- per-vertex / per-finger MAX / per-finger P90 분포를 히스토그램(vis/contact/normal_spread.png)·percentile·임계별 비율로 출력. multi-patch 의심 cluster top-15도. → 분할 임계각 30° 근거.
+
+### render_contact_video.py
+
+- cracker 시퀀스를 프레임별로 좌(카메라 오버레이)/우(turntable, 화살표 포함) 2-패널로 렌더해 하나의 mp4로 연결(vis/contact/contact_clusters.mp4).
+- ColorTracker: 직전 프레임 cluster와 (finger_id, normal 각도<30°) 매칭해 색 id 유지 → 연속 프레임 색 일관. 시퀀스 경계에서 reset.
+- FrameRenderer: OffscreenRenderer 1개 재사용. turntable은 90프레임당 1바퀴 회전. caption은 작은 폰트·좌측 정렬·줄당 5개 wrap.
 
 ### solve_pressure.py
 
@@ -144,31 +184,38 @@ annotation/
 
 ### 환경
 
-- conda env: dexycb-toolkit (`/ssd/sjkim/anaconda3/envs/dexycb-toolkit/bin/python`, Python 3.7). base/dexycb env에는 torch가 없으니 주의.
-- 이 env에 2026-06-12 추가 설치한 패키지: rtree (trimesh proximity용), cvxpy+ECOS (SOCP용).
+- **conda env: `pressure`** (`/ssd/sjkim/anaconda3/envs/pressure/bin/python`, Python 3.7). 2026-06-18에 `dexycb-toolkit`을 clone해서 만든 pressure research 전용 env (`conda create --clone dexycb-toolkit -n pressure`). 기존 `dexycb-toolkit`도 동일하게 동작하지만 앞으로는 `pressure` 사용. base/dexycb env에는 torch가 없으니 주의.
+- 포함 패키지(clone으로 상속): torch 1.13.1+cu117, trimesh 4.4.1, pyrender, rtree(proximity), cvxpy+ECOS(SOCP), scipy(군집화), cv2(비디오), manopth/dex_ycb_toolkit(editable).
 - 환경변수는 스크립트가 직접 세팅함: DEX_YCB_DIR=/datasets/dexycb, PYOPENGL_PLATFORM=egl (headless 렌더링).
 - MANO 모델: dex-ycb-toolkit/manopth/mano/models (gitignore됨). annotation/ 스크립트는 상대경로 → 절대경로 순으로 fallback (compute_contact.py의 find_mano_root()).
 
-### 명령어 (annotation/ 디렉토리에서 실행)
+### 명령어 (annotation/ 디렉토리에서 실행; `conda activate pressure`)
 
 ```Shell
-# 1) contact 추출 + 시각화 (기본 idx 421470)
-/ssd/sjkim/anaconda3/envs/dexycb-toolkit/bin/python compute_contact.py
-/ssd/sjkim/anaconda3/envs/dexycb-toolkit/bin/python compute_contact.py --idx 2588 --thresh 0.0025
+# 1) contact 추출 + 화살표 시각화 (기본 idx 421470)
+python compute_contact.py
+python compute_contact.py --idx 3752 --split_angle 30   # over-edge 분할 확인
 
 # 2) scene 스캔 (41개 시퀀스, ~30초)
-/ssd/sjkim/anaconda3/envs/dexycb-toolkit/bin/python scan_contact_scenes.py
+python scan_contact_scenes.py
 
-# 3) force/pressure 계산 + 시각화
-/ssd/sjkim/anaconda3/envs/dexycb-toolkit/bin/python solve_pressure.py --friction 2d
-/ssd/sjkim/anaconda3/envs/dexycb-toolkit/bin/python solve_pressure.py --friction 1d   # infeasible 로깅 확인용
+# 3) within-finger normal spread 분포(분할 임계각 근거)
+python analyze_normal_spread.py
+
+# 4) 30° 클러스터링+화살표 검증 비디오 (전체 cracker 시퀀스, ~30분)
+python render_contact_video.py            # --max_seqs N 으로 일부만, --stride 로 간격 조정
+
+# 5) force/pressure 계산 + 시각화
+python solve_pressure.py --friction 2d
+python solve_pressure.py --friction 1d    # infeasible 로깅 확인용
 ```
 
 ### 주요 옵션 (공통)
 
 - `--idx` — dataset index (기본 421470. idx↔frame: 같은 시퀀스/카메라에서 연속이므로 idx = (frame 0의 idx) + frame)
 - `--thresh` — proximity threshold [m] (기본 0.005)
-- `--min_verts` — cluster 최소 vertex 수 (기본 3)
+- `--min_verts` — cluster(및 sub-patch) 최소 vertex 수 (기본 3; 미만 stray는 drop)
+- `--split_angle` — within-finger normal-patch 분할 임계각 [deg] (기본 30)
 - `--mass/--mu` — solve_pressure만. 기본 0.411kg / 0.5 (cracker box)
 
 ### 기타 알아두면 좋은 것

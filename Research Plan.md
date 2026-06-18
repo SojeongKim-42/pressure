@@ -48,7 +48,11 @@ DexYCB에서 cracker box (003_cracker_box, m = 0.411 kg) scene을 선택하여 s
 
 → 검증할 scene은 손이 cracker box를 거의 수직으로 집어 올리는 것으로 선택한다.
 
-Proximity threshold로 hand mesh와 object mesh 간 contact vertices를 추출하고, 손가락 단위로 clustering하여 각 cluster의 대표 normal n_k와 contact area_k를 계산한다. 이때 n_k를 hand mesh 기준으로 할지 object mesh 기준으로 할지는 구현 단계에서 확인이 필요하다. n_k의 z 성분이 거의 0인지 (n_k ⊥ gravity) 확인하여 현재 simplification이 성립하는 scene인지 검증한다. 이후 torque equilibrium을 먼저 제외한 상태에서 SOCP를 풀어 f_normal_k를 구하고, pressure_k = f_normal_k / area_k를 계산한 뒤 hand mesh 위에 color map으로 시각화한다.
+Proximity threshold로 hand mesh와 object mesh 간 contact vertices를 추출하고, **손가락 단위로 1차 grouping한 뒤 contact normal 방향으로 다시 patch 단위로 분할**하여 각 cluster(= 손가락 × patch)의 대표 normal n_k와 contact area_k를 계산한다. 한 손가락이 서로 다른 면에 동시에 닿으면(모서리 감아쥠 등) 별도 cluster로 나뉘므로 손가락당 cluster가 여러 개일 수 있다.
+
+> **구현 결정 (2026-06-18, Research context.md 문제 #3/#7):** n_k는 hand mesh normal(noisy)도 nearest-face normal(edge에서 90° 스냅 artifact)도 아닌, **각 접촉 vertex의 contact direction**(`closest_point − hand_vertex`, 손→물체 방향)을 cluster 평균낸 값으로 정의한다. 물리적 force 방향이고, 평면에선 inward normal과 같으며, 순수 기하라 noise가 적고 임의 물체에 일반화된다. 분할 임계각은 cracker box scene들의 within-finger normal spread 분포(bimodal, 골짜기 ~30°)로 30°로 정했고, 다른 object에선 재측정한다.
+
+n_k의 z 성분이 거의 0인지 (n_k ⊥ gravity) 확인하여 현재 simplification이 성립하는 scene인지 검증한다. 이후 torque equilibrium을 먼저 제외한 상태에서 SOCP를 풀어 f_normal_k를 구하고, pressure_k = f_normal_k / area_k를 계산한 뒤 hand mesh 위에 color map으로 시각화한다.
 
 기대 결과는 cracker box (411g, μ = 0.5) 기준 엄지 ~4N / 나머지 손가락 ~1.3N, pressure ~40 kPa / ~13 kPa 수준이다.
 
