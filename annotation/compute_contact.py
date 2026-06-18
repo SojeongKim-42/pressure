@@ -160,10 +160,10 @@ def gravity_in_camera(sample, data_dir):
     return g_cam / np.linalg.norm(g_cam)  # 단위벡터로 정규화
 
 
-# mesh의 vertex별 면적(인접 face 면적의 1/3 합)을 계산한다.
+# mesh의 vertex별 면적을 계산한다.
 def vertex_areas(mesh):
     """Per-vertex area: 1/3 of the area of each incident face."""
-    # 각 face 면적의 1/3을 그 face의 세 vertex에 분배(barycentric/voronoi 근사).
+    # 삼각형 하나의 면적을 세 꼭짓점에 똑같이 1/3씩 분배 (barycentric/voronoi 근사).
     va = np.zeros(len(mesh.vertices))
     # faces.ravel(): 모든 face의 vertex 인덱스를 일렬로. 각 vertex 위치에 누적 가산.
     np.add.at(va, mesh.faces.ravel(), np.repeat(mesh.area_faces / 3.0, 3))
@@ -177,8 +177,8 @@ def detect_contact(hand_mesh, obj_mesh, thresh):
     # 각 손 vertex에서 물체 표면까지의 최근접점/거리/face 인덱스.
     pq = trimesh.proximity.ProximityQuery(obj_mesh)
     closest, dist, tri_id = pq.on_surface(hand_mesh.vertices)
-    # Sign from the closest face's outward normal (robust to non-watertight
-    # meshes): a vertex behind its closest face is inside the object.
+    # Sign from the closest face's outward normal (robust to non-watertight meshes)
+    # : a vertex behind its closest face is inside the object.
     # [부호 판정] (vertex - 최근접점)을 최근접 face의 바깥 normal과 내적.
     #   음수면 vertex가 face 뒤쪽(물체 내부) → 관통. watertight가 아니어도 안전.
     behind = (
