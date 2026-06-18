@@ -12,6 +12,8 @@ DexYCB cracker box scene(idx 421470)에서 proximity 기반 contact 추출과 mi
 
 **(2026-06-18 갱신)** contact clustering을 "손가락 단위"에서 **"손가락 × normal-patch"** 로 정교화: 한 손가락이 두 면에 걸치면(예: 모서리 감아쥠) normal을 평균낼 때 엉뚱한 방향이 나오므로 patch별로 분리. 대표 normal n_k도 nearest-face normal 대신 **contact direction(손 vertex→가장 가까운 물체 표면점 방향)의 평균**으로 변경 — 물리적 force 방향이고 임의 물체에 일반화되며 noise가 적음(문제 #3, #7). 분할 임계각 30°는 41개 cracker scene의 within-finger normal spread 분포(bimodal, 골짜기 ~30°)로 결정. 화살표 시각화·검증 비디오 추가. pressure research 전용 conda env `pressure` 신설.
 
+**(2026-06-18 추가)** pressure 예측을 단일 scene(idx 421470)에서 **여러 cracker scene**으로 확장: 수직 holding뿐 아니라 **기운 grip도 포함**, support contact(n∥g)는 제외, 2D friction, infeasible/contact<2 frame은 skip. 손을 예측 pressure로 칠하고 **접촉력 F_k를 화살표**(길이 ∝ |F_k|)로 그린 멀티 scene 비디오(`render_pressure_video.py`) 생성. 1D vs 2D는 grasp 의존적임을 재확인(문제 #4 갱신).
+
 ---
 
 ## 2. 진행 타임라인 (2026-06-12)
@@ -54,11 +56,18 @@ DexYCB cracker box scene(idx 421470)에서 proximity 기반 contact 추출과 mi
 - **화살표 시각화 (make_arrow/cluster_arrows):** cluster centroid에서 n_k 방향 화살표를 cluster 색과 동일하게 렌더 → "손→물체로 향하는지" 직접 검증. `compute_contact.py --idx`의 정적 figure와 비디오 모두 포함.
 - **검증 비디오 (render_contact_video.py):** 41개 cracker 시퀀스를 좌(카메라 오버레이)/우(중력 기준 turntable, 화살표 포함) 2-패널로 렌더한 mp4. 연속 프레임에서 같은 patch가 같은 색을 유지하도록 ColorTracker(finger_id+normal 각도 매칭). caption은 작은 폰트·좌측 정렬·줄당 5개 wrap.
 
+### [Step 2.5] pressure 멀티 scene 예측 + force 화살표 (2026-06-18, 완료)
+
+단일 scene(idx 421470)에서만 풀던 SOCP를 **여러 cracker scene**으로 확장하고, 예측 결과(접촉력)를 화살표로 시각화했다.
+
+- **force 화살표 (solve_pressure.force_arrows):** 푼 접촉력 F_k = fn·n + ft1·t1 + ft2·t2를 cluster centroid에서 시작하는 초록 화살표로 렌더(길이 ∝ |F_k|, scale 0.022 m/N). pressure inferno colormap과 대비. `solve_pressure.py --idx`의 정적 figure와 비디오 모두 포함.
+- **멀티 scene 비디오 (render_pressure_video.py):** 41개 cracker 시퀀스 전체에서 contact→cluster→SOCP(2D friction)→pressure 파이프라인 실행. **수직 prefilter 없음(기운 grip 포함)**, support contact(n∥g, |n·g|>0.98) 제외, 사용 가능 contact<2 또는 SOCP infeasible frame은 skip(사유별 카운트). 손은 예측 pressure(inferno, **고정 vmax 8kPa**로 frame 간 비교 가능)로 칠하고 force 화살표 추가. 좌(카메라 오버레이)/우(turntable) 2-패널 mp4(`vis/pressure/pressure_clusters.mp4`, 729 frames). `solve_pressure`/`render_contact_video`의 함수 재사용.
+- **1D vs 2D 재확인 (문제 #4 갱신):** 1D feasibility는 grasp 의존적 — 깔끔한 antipodal(idx 421470)은 1D infeasible/2D optimal이지만, 기운 grip(idx 235246)은 1D도 optimal. 2D의 feasible 집합이 1D의 상위집합(1D = 2D + ft2=0)이라, 멀티 scene에서 가장 많은 frame을 푸는 2D를 기본값으로 채택. ("1D 항상 infeasible"은 과장이었음.)
+
 ### [다음 단계] (미착수)
 
 - torque equilibrium 추가.
-- 1D friction을 공식 formulation에서 유지할지 결정 필요 (문제 #4).
-- cracker box 전체 scene으로 확장, infeasibility rate 측정.
+- cracker box 전체에 대해 SOCP infeasibility/support-제외 rate를 정량 측정(현재 비디오는 skip만 카운트).
 - contact area 정의(threshold)에 따른 pressure 스케일 보정 검토 (문제 #5).
 - edge-graze patch(문제 #7)를 force 단계에서 어떻게 다룰지 (현재는 분리만; grazing contact의 spurious force 가능성). `ang(hand,obj)` 진단 지표로 모니터링 중.
 - 다른 object로 확장 시 분할 임계각 30° 재측정 (현재는 cracker box 기준).
@@ -85,12 +94,12 @@ DexYCB cracker box scene(idx 421470)에서 proximity 기반 contact 추출과 mi
 - (1차 결정) hand mesh vertex normal은 손가락 패드 곡면 평균이라 noisy하고 object normal과 3~55° 벌어짐 → object mesh 기준 채택.
 - (2차 결정, 문제 #7 때문) nearest-face normal은 edge에서 가장 가까운 면으로 90° 스냅되는 artifact가 있음. → **n_k = contact direction**(각 vertex의 `closest_point − hand_vertex` 방향, 관continued penetration 부호 반전, 군집 평균)으로 변경. 평면에선 inward object normal과 동일하지만 edge에선 두 면 사이로 blend되고, 순수 기하라 noise가 적으며 임의 물체에 일반화됨. 군집화 기준도 이 벡터로 통일. (compute_contact.contact_directions / split_by_normal / cluster_stats)
 
-### 문제 #4. ★가장 중요★ 1D friction은 best-case scene에서도 INFEASIBLE
+### 문제 #4. ★중요★ 1D friction infeasibility는 grasp 의존적 → 2D를 기본값으로
 
-- idx 421470에서 1D friction SOCP가 infeasible.
-- 원인(기하학적): 중력에 수직인 평면에 normal들을 projection하면, 네 손가락 방향이 -132.6° ~ -155.7° 범위에 모여 있는데 엄지의 반대 방향은 -169.3°. 즉 엄지의 수평 힘을 상쇄해야 할 방향이 손가락 cone 바깥에 13.6° 벗어나 있음. 1D friction(수직 방향뿐)으로는 이 lateral gap을 메울 수 없어 force equilibrium 자체가 불가능.
-- 계획서의 known limitation("1D friction은 lateral friction을 표현 못해 일부 grasp에서 infeasibility 유발")이 torque 단계가 아니라 force equilibrium 단계에서, 가장 이상적인 scene에서도 발생. 실제 grasp은 완벽한 antipodal이 아니기 때문 (normal들이 ~20° 기울어짐).
-- → solve_pressure.py에 `--friction {1d,2d}` 옵션 추가. 1d는 계획서 formulation 그대로(infeasible 시 logging 후 종료), 2d는 full friction cone ||(f_t1,f_t2)|| ≤ μ·f_n (SOCP). 2D friction을 기본 formulation으로 승격할지 결정 필요 — 1D는 거의 모든 scene에서 infeasible할 가능성 높음.
+- **1D가 깨지는 대표 케이스 = 깔끔한 antipodal 그립 (idx 421470).** 중력 수직 평면에 normal projection: 네 손가락이 -132.6°~-155.7°에 모여 있는데 엄지 반대 방향은 -169.3°로 손가락 cone 밖 13.6°. 1D friction(중력반대 한 축뿐)은 이 lateral gap을 못 메워 force equilibrium 자체가 infeasible.
+- **단, 1D infeasibility는 항상은 아님 — grasp 기하 의존적.** 재확인(2026-06-18): idx 421470 → 1D infeasible / 2D optimal, 기운 grip idx 235246 → **1D·2D 모두 optimal**. 비대칭/기운 그립은 contact 방향이 다양해 1D로도 풀림. (이전 "1D 거의 항상 infeasible"은 과장이었음.)
+- **2D를 기본값으로 쓰는 이유:** 2D의 feasible 집합은 1D의 **상위집합**(1D = 2D + ft2=0 제약). 따라서 2D는 1D가 풀리는 모든 경우 + antipodal 케이스까지 풀어, 멀티 scene에서 푸는 frame 수를 최대화. 계획서도 1D를 limitation으로 명시하고 2D 확장을 해결책으로 제시했음.
+- → solve_pressure.py `--friction {1d,2d}` (기본 2d). 1d=계획서 formulation(|f_t1|≤μf_n), 2d=full cone ||(f_t1,f_t2)||≤μf_n. render_pressure_video.py도 2d 기본.
 
 ### 문제 #5. 2D friction 결과: force는 기대치와 일치, pressure 스케일은 area 때문에 낮음
 
@@ -132,12 +141,14 @@ annotation/
 ├── scan_contact_scenes.py    # [Step 1.5] 전체 scene 스캔/랭킹
 ├── analyze_normal_spread.py  # [Step 1.6] within-finger normal spread 분포(분할 임계각 결정)
 ├── render_contact_video.py   # [Step 1.6] 30° 클러스터링+화살표 검증 비디오(turntable)
-├── solve_pressure.py         # [Step 2] min-effort SOCP → pressure + 시각화
+├── solve_pressure.py         # [Step 2] min-effort SOCP → pressure + force 화살표 시각화
+├── render_pressure_video.py  # [Step 2.5] 멀티 scene pressure 예측 비디오(force 화살표)
 └── vis/
     ├── contact/            # contact_<idx>.png (화살표 포함 figure), contact_<idx>.npz,
     │                       # scan_results.npz, normal_spread.{png,npz},
     │                       # contact_clusters.mp4 (검증 비디오)
-    └── pressure/           # pressure_<idx>_<1d|2d>.png / .npz
+    └── pressure/           # pressure_<idx>_<1d|2d>.png / .npz,
+                            # pressure_clusters.mp4 (멀티 scene 비디오)
 ```
 
 ### compute_contact.py — 핵심 함수 (다른 스크립트에서 import해서 재사용)
@@ -174,9 +185,15 @@ annotation/
 ### solve_pressure.py
 
 - compute_contact의 파이프라인을 import해 contact cluster를 다시 계산한 뒤 cvxpy(ECOS)로 min-effort 문제 풀이. torque equilibrium은 아직 미포함.
-- **friction_tangent():** t1 = -ĝ의 tangential projection(단위벡터), t2 = n × t1. ||projection|| < 0.2면 singularity로 해당 cluster 제외+로깅.
-- `--friction 1d`: f_t2=0, |f_t1| ≤ μf_n (계획서 formulation, QP). `--friction 2d`: ||(f_t1,f_t2)|| ≤ μf_n (full cone, SOCP).
-- infeasible이면 status 로깅 후 종료(계획서 방침). optimal이면 pressure_k = f_n_k / area_k 계산, 손 mesh에 inferno colormap 시각화.
+- **friction_tangent():** t1 = -ĝ의 tangential projection(단위벡터), t2 = n × t1. ||projection|| < 0.2면 singularity(=support contact)로 해당 cluster 제외+로깅.
+- `--friction 1d`: f_t2=0, |f_t1| ≤ μf_n (계획서 formulation, QP). `--friction 2d`: ||(f_t1,f_t2)|| ≤ μf_n (full cone, SOCP). **기본 2d** (문제 #4).
+- infeasible이면 status 로깅 후 종료(계획서 방침). optimal이면 pressure_k = f_n_k / area_k 계산, 손 mesh에 inferno colormap + **접촉력 F_k 초록 화살표(force_arrows, 길이 ∝ |F_k|)** 시각화.
+
+### render_pressure_video.py
+
+- solve_pressure(SOCP, force_arrows) + render_contact_video(FrameRenderer, compose_frame)를 재사용해 41개 cracker 시퀀스의 pressure 예측을 비디오로(vis/pressure/pressure_clusters.mp4).
+- **수직 prefilter 없음(기운 grip 포함)**, support contact(friction_tangent None) 제외, 사용 가능 contact<2 또는 SOCP infeasible frame은 skip하고 사유별(no_contact/few_usable/infeasible) 카운트.
+- 손을 예측 pressure(inferno, **고정 vmax**=`--vmax_kpa` 기본 8kPa, frame 간 비교 가능)로 칠하고 force 화살표 추가. 좌(카메라 오버레이)/우(turntable) 2-패널. `--friction` 기본 2d.
 
 ---
 
@@ -205,9 +222,12 @@ python analyze_normal_spread.py
 # 4) 30° 클러스터링+화살표 검증 비디오 (전체 cracker 시퀀스, ~30분)
 python render_contact_video.py            # --max_seqs N 으로 일부만, --stride 로 간격 조정
 
-# 5) force/pressure 계산 + 시각화
-python solve_pressure.py --friction 2d
-python solve_pressure.py --friction 1d    # infeasible 로깅 확인용
+# 5) force/pressure 계산 + force 화살표 시각화 (단일 scene)
+python solve_pressure.py --idx 421470 --friction 2d
+python solve_pressure.py --idx 421470 --friction 1d   # 1D infeasible 확인용(이 scene)
+
+# 6) 멀티 scene pressure 예측 비디오 (전체 cracker, 기운 grip 포함, ~25-35분)
+python render_pressure_video.py           # --max_seqs N, --stride, --vmax_kpa 8
 ```
 
 ### 주요 옵션 (공통)
@@ -216,7 +236,10 @@ python solve_pressure.py --friction 1d    # infeasible 로깅 확인용
 - `--thresh` — proximity threshold [m] (기본 0.005)
 - `--min_verts` — cluster(및 sub-patch) 최소 vertex 수 (기본 3; 미만 stray는 drop)
 - `--split_angle` — within-finger normal-patch 분할 임계각 [deg] (기본 30)
-- `--mass/--mu` — solve_pressure만. 기본 0.411kg / 0.5 (cracker box)
+- `--mass/--mu` — solve_pressure / render_pressure_video. 기본 0.411kg / 0.5 (cracker box)
+- `--friction {1d,2d}` — solve_pressure / render_pressure_video (기본 2d)
+- `--vmax_kpa` — render_pressure_video pressure colormap 상한 [kPa] (기본 8, 초과 clip)
+- `--max_seqs / --stride` — 비디오 스크립트: 처리 시퀀스 수 제한 / frame 간격
 
 ### 기타 알아두면 좋은 것
 
