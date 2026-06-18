@@ -59,18 +59,38 @@ def force_arrows(kept, normals, tangents1, tangents2, fn, ft1, ft2):
         smooth=False))
   return arrows
 
-# n_k nearly parallel to gravity leaves t_k undefined (support-case
-# singularity, excluded by the current formulation).
+# 1D friction 전용: n_k가 중력과 거의 평행하면 anti-gravity tangent t1이 undefined
+# (support-case singularity) → 해당 cluster 제외. 2D는 generic_tangent를 써서
+# 이 제외가 필요 없다(basis 방향이 결과에 무관, support도 풀림).
 _SINGULAR_TANGENT_NORM = 0.2
 
 
 def friction_tangent(n, g_hat):
-  """Tangent-plane basis (t1, t2): t1 = anti-gravity projection, t2 = n x t1."""
+  """1D-friction tangent basis: t1 = anti-gravity projection, t2 = n x t1.
+
+  Returns None when n is ~parallel to gravity (t1 undefined). Used ONLY for the
+  1D formulation, where the single friction axis must be the anti-gravity one.
+  """
   t1 = -g_hat - (-g_hat @ n) * n
   norm = np.linalg.norm(t1)
   if norm < _SINGULAR_TANGENT_NORM:
     return None
   t1 = t1 / norm
+  return t1, np.cross(n, t1)
+
+
+def generic_tangent(n):
+  """Arbitrary orthonormal tangent basis (t1, t2) perpendicular to n.
+
+  For 2D friction the basis orientation does not affect the solution (the
+  friction set is an isotropic disk), so any basis works -- and unlike
+  friction_tangent it is always defined, so support contacts (n ~parallel to
+  gravity) are handled instead of excluded.
+  """
+  n = np.asarray(n, dtype=np.float64)
+  ref = np.array([1.0, 0.0, 0.0]) if abs(n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+  t1 = np.cross(n, ref)
+  t1 /= np.linalg.norm(t1)
   return t1, np.cross(n, t1)
 
 
@@ -130,8 +150,9 @@ def main():
   parser.add_argument("--min_verts", type=int, default=3)
   parser.add_argument("--mass", type=float, default=_DEFAULT_MASS)
   parser.add_argument("--mu", type=float, default=_DEFAULT_MU)
-  parser.add_argument("--friction", choices=["1d", "2d"], default="1d",
-                      help="1d: plan formulation; 2d: full friction cone")
+  parser.add_argument("--friction", choices=["1d", "2d"], default="2d",
+                      help="2d: full friction cone (default, handles support); "
+                           "1d: plan formulation (excludes support singularity)")
   parser.add_argument("--out_dir",
                       default=os.path.join(os.path.dirname(_DEFAULT_OUT_DIR),
                                            "pressure"))
@@ -151,14 +172,17 @@ def main():
   print("%s, m=%.3f kg, mu=%.2f, %d contact clusters" %
         (dataset.ycb_classes[ycb_id], args.mass, args.mu, len(clusters)))
 
-  # Object-based normals; drop singular clusters (t_k undefined).
+  # 2D는 generic basis라 support contact 포함; 1D는 anti-gravity 축이라 support 제외.
   kept, normals, tangents1, tangents2 = [], [], [], []
   for c in clusters:
-    t = friction_tangent(c["n_obj"], g_cam)
-    if t is None:
-      print("  [excluded] %s: n_k parallel to gravity (|n.g|=%.2f)" %
-            (c["label"], abs(c["dot_g_obj"])))
-      continue
+    if args.friction == "1d":
+      t = friction_tangent(c["n_obj"], g_cam)
+      if t is None:
+        print("  [excluded] %s: n_k parallel to gravity (|n.g|=%.2f), 1D only" %
+              (c["label"], abs(c["dot_g_obj"])))
+        continue
+    else:
+      t = generic_tangent(c["n_obj"])
     kept.append(c)
     normals.append(c["n_obj"])
     tangents1.append(t[0])

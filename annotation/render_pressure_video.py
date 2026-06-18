@@ -35,7 +35,7 @@ from dex_ycb_toolkit.factory import get_dataset
 from compute_contact import (cluster_stats, detect_contact, gravity_in_camera,
                              load_hand)
 from solve_pressure import (_DEFAULT_MASS, _DEFAULT_MU, _GRAVITY, force_arrows,
-                            friction_tangent, solve_min_effort)
+                            friction_tangent, generic_tangent, solve_min_effort)
 from render_contact_video import FrameRenderer, compose_frame
 from scan_contact_scenes import _CRACKER_YCB_ID, _SERIAL
 
@@ -69,10 +69,13 @@ def solve_frame(hand_mesh, obj_mesh, finger, g_cam, thresh, min_verts, mass, mu,
     kept, normals, t1s, t2s = [], [], [], []
     n_support = 0
     for c in clusters:
-        t = friction_tangent(c["n_obj"], g_cam)
-        if t is None:  # n_k ∥ gravity → support contact, 제외
-            n_support += 1
-            continue
+        if friction == "1d":
+            t = friction_tangent(c["n_obj"], g_cam)
+            if t is None:  # n_k ∥ gravity → 1D singularity, support 제외
+                n_support += 1
+                continue
+        else:  # 2D: generic basis, support contact 포함
+            t = generic_tangent(c["n_obj"])
         kept.append(c)
         normals.append(c["n_obj"])
         t1s.append(t[0])

@@ -99,7 +99,8 @@ DexYCB cracker box scene(idx 421470)에서 proximity 기반 contact 추출과 mi
 - **1D가 깨지는 대표 케이스 = 깔끔한 antipodal 그립 (idx 421470).** 중력 수직 평면에 normal projection: 네 손가락이 -132.6°~-155.7°에 모여 있는데 엄지 반대 방향은 -169.3°로 손가락 cone 밖 13.6°. 1D friction(중력반대 한 축뿐)은 이 lateral gap을 못 메워 force equilibrium 자체가 infeasible.
 - **단, 1D infeasibility는 항상은 아님 — grasp 기하 의존적.** 재확인(2026-06-18): idx 421470 → 1D infeasible / 2D optimal, 기운 grip idx 235246 → **1D·2D 모두 optimal**. 비대칭/기운 그립은 contact 방향이 다양해 1D로도 풀림. (이전 "1D 거의 항상 infeasible"은 과장이었음.)
 - **2D를 기본값으로 쓰는 이유:** 2D의 feasible 집합은 1D의 **상위집합**(1D = 2D + ft2=0 제약). 따라서 2D는 1D가 풀리는 모든 경우 + antipodal 케이스까지 풀어, 멀티 scene에서 푸는 frame 수를 최대화. 계획서도 1D를 limitation으로 명시하고 2D 확장을 해결책으로 제시했음.
-- → solve_pressure.py `--friction {1d,2d}` (기본 2d). 1d=계획서 formulation(|f_t1|≤μf_n), 2d=full cone ||(f_t1,f_t2)||≤μf_n. render_pressure_video.py도 2d 기본.
+- → **2026-06-18: 모든 스크립트 기본 2d로 확정** (`--friction` 기본값 2d, 사용자: "1D 고집할 필요 없다"). 1d=계획서 formulation(|f_t1|≤μf_n), 2d=full cone ||(f_t1,f_t2)||≤μf_n.
+- **support case 처리:** 2D는 tangent basis 방향이 해에 무관(등방적 disk)하므로 `generic_tangent(n)`(n에 수직인 임의 직교 basis)을 써서 n∥g인 **support/수직 접점도 제외 없이 포함**한다. min-effort가 위로 향한 normal force로 무게를 받쳐 grip을 줄이는 걸 자동으로 잡음. 1d만 `friction_tangent`(anti-gravity 축)을 써서 support를 제외(genuine singularity). 검증: idx 3752 2d는 윗면 누르는 수직 접점들을 이제 포함하되 min-effort가 fn=0을 줌(아래로 누르는 접점이라 무게에 안 보탬 → 물리적으로 정확).
 
 ### 문제 #5. 2D friction 결과: force는 기대치와 일치, pressure 스케일은 area 때문에 낮음
 
@@ -185,14 +186,14 @@ annotation/
 ### solve_pressure.py
 
 - compute_contact의 파이프라인을 import해 contact cluster를 다시 계산한 뒤 cvxpy(ECOS)로 min-effort 문제 풀이. torque equilibrium은 아직 미포함.
-- **friction_tangent():** t1 = -ĝ의 tangential projection(단위벡터), t2 = n × t1. ||projection|| < 0.2면 singularity(=support contact)로 해당 cluster 제외+로깅.
+- **tangent basis:** 2d는 `generic_tangent(n)`(n에 수직인 임의 직교 basis, 항상 정의됨 → support 포함). 1d는 `friction_tangent(n,g)`(t1=anti-gravity projection; n∥g면 None → support 제외).
 - `--friction 1d`: f_t2=0, |f_t1| ≤ μf_n (계획서 formulation, QP). `--friction 2d`: ||(f_t1,f_t2)|| ≤ μf_n (full cone, SOCP). **기본 2d** (문제 #4).
 - infeasible이면 status 로깅 후 종료(계획서 방침). optimal이면 pressure_k = f_n_k / area_k 계산, 손 mesh에 inferno colormap + **접촉력 F_k 초록 화살표(force_arrows, 길이 ∝ |F_k|)** 시각화.
 
 ### render_pressure_video.py
 
 - solve_pressure(SOCP, force_arrows) + render_contact_video(FrameRenderer, compose_frame)를 재사용해 41개 cracker 시퀀스의 pressure 예측을 비디오로(vis/pressure/pressure_clusters.mp4).
-- **수직 prefilter 없음(기운 grip 포함)**, support contact(friction_tangent None) 제외, 사용 가능 contact<2 또는 SOCP infeasible frame은 skip하고 사유별(no_contact/few_usable/infeasible) 카운트.
+- **수직 prefilter 없음(기운 grip 포함)**, 2d는 support 포함(generic_tangent), 사용 가능 contact<2 또는 SOCP infeasible frame은 skip하고 사유별(no_contact/few_usable/infeasible) 카운트.
 - 손을 예측 pressure(inferno, **고정 vmax**=`--vmax_kpa` 기본 8kPa, frame 간 비교 가능)로 칠하고 force 화살표 추가. 좌(카메라 오버레이)/우(turntable) 2-패널. `--friction` 기본 2d.
 
 ---
