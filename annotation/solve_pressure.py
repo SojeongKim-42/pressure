@@ -25,15 +25,39 @@ import trimesh
 
 from dex_ycb_toolkit.factory import get_dataset
 
+import pyrender as _pyrender  # for force-arrow meshes
+
 from compute_contact import (_DEFAULT_OUT_DIR, _FINGER_NAMES, cluster_stats,
                              detect_contact, gravity_in_camera, load_hand,
-                             load_object, render_orbit, render_overlay)
+                             load_object, make_arrow, render_orbit,
+                             render_overlay)
 
 _GRAVITY = 9.81  # m/s^2
 
 # Literature-based defaults for the cracker box (see Research Plan).
 _DEFAULT_MASS = 0.411  # kg, 003_cracker_box
 _DEFAULT_MU = 0.5      # dry skin on coated cardboard
+
+# Force-arrow 시각화: 손이 물체에 가하는 접촉력 F_k = fn·n + ft1·t1 + ft2·t2 방향,
+# 길이 ∝ |F_k| (scale m/N). pressure inferno colormap과 대비되도록 밝은 초록.
+_FORCE_ARROW_COLOR = np.array([40, 220, 70, 255], dtype=np.uint8)
+_FORCE_ARROW_SCALE = 0.022  # m per N (thumb ~4.4N → ~10cm, 손가락 ~1N → ~2cm)
+
+
+def force_arrows(kept, normals, tangents1, tangents2, fn, ft1, ft2):
+  """Per-contact force vector F_k as arrows (centroid origin, length ∝ |F_k|)."""
+  arrows = []
+  for c, n, t1, t2, a, b, d in zip(kept, normals, tangents1, tangents2,
+                                   fn, ft1, ft2):
+    fvec = a * np.asarray(n) + b * np.asarray(t1) + d * np.asarray(t2)
+    mag = np.linalg.norm(fvec)
+    if mag < 1e-6:
+      continue
+    arrows.append(_pyrender.Mesh.from_trimesh(
+        make_arrow(c["centroid"], fvec, _FORCE_ARROW_COLOR,
+                   length=mag * _FORCE_ARROW_SCALE, shaft_radius=0.0026),
+        smooth=False))
+  return arrows
 
 # n_k nearly parallel to gravity leaves t_k undefined (support-case
 # singularity, excluded by the current formulation).
@@ -198,11 +222,14 @@ def main():
                       faces=hand_mesh.faces.copy(),
                       vertex_colors=colors,
                       process=False))
-  im_overlay = render_overlay(sample, pr_mesh, obj_mesh, dataset.w, dataset.h)
+  # 접촉력 F_k 화살표 (길이 ∝ 힘 크기).
+  arrows = force_arrows(kept, normals, tangents1, tangents2, fn, ft1, ft2)
+  im_overlay = render_overlay(sample, pr_mesh, obj_mesh, dataset.w, dataset.h,
+                              extra_meshes=arrows)
   ims_orbit = render_orbit(sample, pr_mesh, obj_mesh, g_cam, dataset.w,
-                           dataset.h)
+                           dataset.h, extra_meshes=arrows)
   ims_hand = render_orbit(sample, pr_mesh, obj_mesh, g_cam, dataset.w,
-                          dataset.h, with_object=False)
+                          dataset.h, with_object=False, extra_meshes=arrows)
 
   fig, axes = plt.subplots(3, 4, figsize=(16, 9.5))
   axes[0, 0].imshow(im_overlay)
