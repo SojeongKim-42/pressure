@@ -233,6 +233,10 @@ class DexYCBDataset():
         self._mano_betas.append(mano_calib['betas'])
       offset += len(seq)
     self._mapping = np.vstack(self._mapping)
+    self._bop_to_idx = {
+        (int(s * len(self._serials) + c), int(f)): idx
+        for idx, (s, c, f) in enumerate(self._mapping)
+    }
 
   def __len__(self):
     return len(self._mapping)
@@ -288,3 +292,15 @@ class DexYCBDataset():
     scene_id = s * len(self._serials) + c
     im_id = f
     return scene_id, im_id
+
+  def get_idx_from_bop_id(self, scene_id, im_id):
+    """Returns the dataset index given a BOP scene ID and image ID.
+
+    Args:
+      scene_id: BOP scene ID.
+      im_id: BOP image ID.
+
+    Returns:
+      idx: Index of sample.
+    """
+    return self._bop_to_idx[(scene_id, im_id)]

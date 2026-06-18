@@ -10,12 +10,17 @@ import trimesh
 import torch
 import cv2
 import matplotlib.pyplot as plt
+import os
+
+os.environ["PYOPENGL_PLATFORM"] = "egl"
+os.environ["DEX_YCB_DIR"] = "/datasets/dexycb"
 
 from manopth.manolayer import ManoLayer
 
 from dex_ycb_toolkit.factory import get_dataset
 
 
+# target scene: /home/sjkim/Research/pressure/datasets/dexycb/20200709-subject-01/20200709_150830/932122060861/color_000040.jpg
 def create_scene(sample, obj_file):
     """Creates the pyrender scene of an image sample.
 
@@ -95,7 +100,12 @@ def main():
     name = "s0_train"
     dataset = get_dataset(name)
 
-    idx = 70
+    # idx = 51
+    scene_id = 51
+    im_id = 32
+    # scene_id = 45
+    # im_id = 39
+    idx = dataset.get_idx_from_bop_id(scene_id, im_id)
 
     sample = dataset[idx]
 
@@ -117,8 +127,12 @@ def main():
 
     plt.imshow(im)
     plt.tight_layout()
-    plt.savefig("visualize_output.png", dpi=150, bbox_inches="tight")  # show → savefig
-    print("Saved to visualize_output.png")
+    OUT_DIR = "vis"
+    if not os.path.exists(OUT_DIR):
+        os.makedirs(OUT_DIR)
+    SAVE_PATH = os.path.join(OUT_DIR, f"visualize_output{idx}.png")
+    plt.savefig(SAVE_PATH, dpi=150, bbox_inches="tight")  # show → savefig
+    print(f"Saved to {SAVE_PATH}")
 
 
 if __name__ == "__main__":
