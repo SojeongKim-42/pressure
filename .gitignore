@@ -5,5 +5,7 @@
 *.egg-info
 *.log
 *.png
+*.mp4
+CLAUDE.md
 setup.sh
 datasets/

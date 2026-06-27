@@ -77,12 +77,21 @@ _NON_CONTACT_COLOR = np.array(
     [190, 190, 190, 255], dtype=np.uint8
 )  # 비접촉 vertex 회색
 
-# 한 손가락이 두 개 이상의 물체 면에 걸쳐 닿을 때(예: 모서리를 감아쥠) cluster를
-# 나누는 normal 각도 임계값. 41개 cracker-box 시퀀스의 within-finger object-normal
-# spread 분포(analyze_normal_spread.py)가 single-face(~수°)와 multi-face(~70°)로
-# bimodal했고 그 골짜기가 ~30°라 이 값으로 정함. cracker box 기준이라 다른 물체에선
-# 재측정 필요.
-_SPLIT_ANGLE_DEG = 30.0
+# 한 손가락이 두 개 이상의 물체 면/곡면에 걸쳐 닿을 때(예: 모서리 감아쥠, 원통 감기)
+# cluster를 나누는 normal 각도 임계값.
+#
+# (1차) cracker box 41 시퀀스의 within-finger normal spread가 single-face(~수°) /
+# multi-face(~70°)로 bimodal, 골짜기 ~30°라 30°로 정했음.
+# (2차, 2026-06-28) 곡면 물체(can/bowl 등)는 normal이 연속이라 bimodal 골짜기가 없음
+# → threshold는 data가 주는 값이 아니라 "한 patch를 대표 normal 1개로 뭉칠 때의 허용
+# 오차 = 손가락 패드 크기"로 재정의. sweep_split_angle.py로 9개 물체(box 3/can 3/
+# bowl·mug·bottle)를 sweep한 결과, T=20°에서 patch 공간지름이 모든 물체에서 ~1.5-2.2cm
+# (손가락 패드 한 개)로 수렴하고 within-patch resultant R≈0.99·P90 spread<10°로 normal
+# 근사가 깔끔했음. T<15°는 패드를 쪼개는 과분할(area artifact), T>40°는 패드를 넘겨 wrap을
+# 한 덩어리로 묶음. box는 평면이라 T에 둔감(20°/30° 사실상 동일)해 전 물체 공통 20°로 통일.
+# 주의: 진짜 물체-불변 기준은 각도가 아니라 patch 공간크기(~2cm 패드)이며, 20°는 YCB
+# 곡률대(반경 3-7cm)에서 그에 정렬된 값. 곡률이 크게 다른 물체엔 공간크기 가드가 필요.
+_SPLIT_ANGLE_DEG = 20.0
 
 # 최종 cluster(= finger × patch)별 시각화 색. 손가락당 patch가 여러 개일 수 있어
 # 손가락색 대신 cluster 인덱스로 구분되는 팔레트(tab20)를 쓴다.

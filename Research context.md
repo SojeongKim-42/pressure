@@ -8,7 +8,7 @@
 
 ## 1. 한 줄 요약
 
-DexYCB cracker box scene(idx 421470)에서 proximity 기반 contact 추출과 min-effort SOCP(torque 제외)까지 구현·검증 완료. force 추정치는 계획서 기대치와 일치 (엄지 ~4.4N / 손가락 ~0.8-1.5N). 단, 계획서의 1D friction formulation은 best-case scene에서도 infeasible임을 확인 → 2D friction(full cone)으로 해결. 모든 코드는 `annotation/` 폴더에 있음 (dex-ycb-toolkit 내부에서 작업하지 않기로 함).
+DexYCB cracker box scene(idx 421470)에서 proximity 기반 contact 추출과 min-effort SOCP(force + torque equilibrium)까지 구현·검증 완료. force-only 추정치는 계획서 기대치와 일치(엄지 ~4.4N / 손가락 ~0.8-1.5N)했고, torque equilibrium 추가 시 회전 평형 때문에 grip force가 ~2.3배 증가(Step 3). 단, 계획서의 1D friction formulation은 best-case scene에서도 infeasible임을 확인 → 2D friction(full cone)으로 해결. 모든 코드는 `annotation/` 폴더에 있음 (dex-ycb-toolkit 내부에서 작업하지 않기로 함).
 
 **(2026-06-18 갱신)** contact clustering을 "손가락 단위"에서 **"손가락 × normal-patch"** 로 정교화: 한 손가락이 두 면에 걸치면(예: 모서리 감아쥠) normal을 평균낼 때 엉뚱한 방향이 나오므로 patch별로 분리. 대표 normal n_k도 nearest-face normal 대신 **contact direction(손 vertex→가장 가까운 물체 표면점 방향)의 평균**으로 변경 — 물리적 force 방향이고 임의 물체에 일반화되며 noise가 적음(문제 #3, #7). 분할 임계각 30°는 41개 cracker scene의 within-finger normal spread 분포(bimodal, 골짜기 ~30°)로 결정. 화살표 시각화·검증 비디오 추가. pressure research 전용 conda env `pressure` 신설.
 
@@ -64,13 +64,32 @@ DexYCB cracker box scene(idx 421470)에서 proximity 기반 contact 추출과 mi
 - **멀티 scene 비디오 (render_pressure_video.py):** 41개 cracker 시퀀스 전체에서 contact→cluster→SOCP(2D friction)→pressure 파이프라인 실행. **수직 prefilter 없음(기운 grip 포함)**, support contact(n∥g, |n·g|>0.98) 제외, 사용 가능 contact<2 또는 SOCP infeasible frame은 skip(사유별 카운트). 손은 예측 pressure(inferno, **고정 vmax 8kPa**로 frame 간 비교 가능)로 칠하고 force 화살표 추가. 좌(카메라 오버레이)/우(turntable) 2-패널 mp4(`vis/pressure/pressure_clusters.mp4`, 729 frames). `solve_pressure`/`render_contact_video`의 함수 재사용.
 - **1D vs 2D 재확인 (문제 #4 갱신):** 1D feasibility는 grasp 의존적 — 깔끔한 antipodal(idx 421470)은 1D infeasible/2D optimal이지만, 기운 grip(idx 235246)은 1D도 optimal. 2D의 feasible 집합이 1D의 상위집합(1D = 2D + ft2=0)이라, 멀티 scene에서 가장 많은 frame을 푸는 2D를 기본값으로 채택. ("1D 항상 infeasible"은 과장이었음.)
 
+### [Step 3] torque equilibrium 추가 (2026-06-23, 완료)
+
+force-only SOCP에 torque equilibrium `Σ_k r_k × F_k = 0`을 추가했다. 계획서의 full formulation 완성.
+
+- **수식:** r_k = (cluster centroid − object COM). **물체 COM 기준으로 모멘트를 잡으면 중력(COM에 작용)의 모멘트 팔이 0**이라 torque 식에 중력 항이 안 들어간다(계획서 formulation과 동일). cross product `r_k × F_k`는 force 스칼라(fn, ft1, ft2)에 대해 선형이므로 SOCP가 그대로 유지됨 — `Σ_k fn_k(r_k×n_k) + ft1_k(r_k×t1_k) + ft2_k(r_k×t2_k) = 0`을 3×K 행렬 3개로 구성(force balance 구조와 동형).
+- **COM (solve_pressure.object_com):** watertight면 trimesh `center_mass`(균일밀도 부피 중심), 아니면 vertex mean fallback. YCB cracker mesh는 non-watertight라 vertex mean 사용(박스라 기하 중심 ≈ COM, 합리적 근사). torque는 COM 정확도에 민감하다는 점이 limitation.
+- **구현:** `solve_min_effort(..., arms, torque)`, `solve_pressure.py`/`render_pressure_video.py` 모두 `--no_torque`로 force-only 비교 가능(기본 torque ON). npz에 object_com/arms/torque_residual 저장, 출력 파일에 `_torque` 태그.
+- **★핵심 결과 (idx 421470, m=0.411kg, μ=0.5, 2D):** torque를 켜면 **grip force가 크게 증가**(total f_n 8.97N → 20.3N, ≈2.3배; 엄지 3.99N → 8.84N). force-only min-effort는 회전 평형을 무시해 systematic under-grip을 하는데, torque를 강제하면 net moment를 상쇄하려 더 큰 대향력이 필요하고 하중이 재분배됨(index1·thumb·little1이 받고 index0·ring0는 ~0). **계획서 Known Limitations의 "systematic underestimation"에 대해 torque가 grip force 하한을 끌어올린다**는 의미. 두 모드 모두 optimal, force residual ~1e-10, torque residual ~1e-11(ON)/~0.3 N·m(OFF, 미구속).
+- **멀티 scene infeasibility (6 seq, stride 6, 동일 candidate 41 frame[≥2 contact] 기준):** torque ON에서 infeasible이 늘어남 — force-only 12/41(29%) → torque 15/41(37%), +3 frame(+8pp). torque 제약이 feasible set을 좁히는 건 예상된 결과(force-only의 부분집합). 정량 측정은 전체 cracker로 확장 필요(다음 단계).
+
+### [Step 4] 다른 object 확장 + 분할 임계각 일반화 (2026-06-28, 진행 중)
+
+cracker box(평면) 외 곡면 물체로 확장 시작. 첫 대상은 **can(002_master_chef_can, ycb_id=1)**, μ=1.11(aluminium-skin, Derler/문헌 1.11±0.48에서 채택), mass는 추후 YCB 표값. box→bowl 중간 난이도라 can을 먼저(강체라 COM·torque 깨끗, 곡면 clustering 문제를 단순한 형태로 선행; bowl은 속이 비어 COM이 기하중심이 아니라 torque 보정 필요).
+
+- **scan/analyze 일반화:** `scan_contact_scenes.py`·`analyze_normal_spread.py`에 `--ycb_id` 추가(2/cracker, 1/can, 13/bowl). scan의 box-전용 "vertical(장축∥g)" prefilter는 `--vertical_min 0`으로 끌 수 있게(곡면용); lift/정지 filter는 generic. 출력은 object명으로 태깅(cracker 결과 안 덮음).
+- **★can spread 측정 결과 — box의 bimodal 구조가 재현 안 됨:** can 526 frame/2077 finger-cluster에서 within-finger contact-normal spread는 per-vertex median **13.3°**(0° floor 없음), per-finger P90 median 23°. 즉 평면처럼 "단일면=spread 0"인 noise floor가 없고 곡률 때문에 연속적으로 퍼짐 → cracker의 bimodal 골짜기(~30°)가 **없음**. 30°는 can에서 주 봉우리의 어깨에 걸쳐 임의 과분할을 유발.
+- **★split-threshold sweep (sweep_split_angle.py, 9개 물체: box 3/can 3/bowl·mug·bottle):** T를 10~90° sweep하며 ① 손가락당 patch 수 ② patch 공간지름[cm] ③ within-patch P90 spread ④ resultant R 측정. **T=20°에서 patch 공간지름이 모든 물체에서 ~1.5-2.2cm(손가락 패드 한 개)로 수렴**하고 within-patch R≈0.99·P90 spread<10°. T<15°는 패드를 쪼개는 과분할(area artifact 시작), T>40°는 패드를 넘겨 wrap을 한 덩어리로 묶음. box는 평면이라 T에 둔감(cracker 20°/30° 사실상 동일). R 단독은 너무 관대(~55-60°까지 0.95↑)라 binding이 아니고, **진짜 기준은 patch 공간크기≈패드(~2cm)**. → **`_SPLIT_ANGLE_DEG`를 30°→20°로 전 물체 통일**(compute_contact.py; contact/pressure 전 파이프라인에 전파). 단 20°는 YCB 곡률대(반경 3-7cm)에서 2cm에 정렬된 값이라, 곡률이 크게 다른 물체엔 "지름 2cm 초과 시 추가 분할" 같은 공간크기 가드가 필요(미구현).
+- 산출물: `vis/contact/normal_spread_<obj>.{png,npz}`, `vis/contact/split_sweep.{png,npz}`.
+
 ### [다음 단계] (미착수)
 
-- torque equilibrium 추가.
-- cracker box 전체에 대해 SOCP infeasibility/support-제외 rate를 정량 측정(현재 비디오는 skip만 카운트).
+- can으로 contact/pressure 계산 + normal 저장 실행(다음 작업). 이후 bowl(ycb_id=13, COM 보정 필요).
+- cracker box 전체에 대해 SOCP infeasibility/support-제외 rate를 정량 측정(현재 비디오는 skip만 카운트). torque ON/OFF infeasibility 차이도 포함.
 - contact area 정의(threshold)에 따른 pressure 스케일 보정 검토 (문제 #5).
 - edge-graze patch(문제 #7)를 force 단계에서 어떻게 다룰지 (현재는 분리만; grazing contact의 spurious force 가능성). `ang(hand,obj)` 진단 지표로 모니터링 중.
-- 다른 object로 확장 시 분할 임계각 30° 재측정 (현재는 cracker box 기준).
+- 곡률 불변 일반화: 각도 대신 patch 공간크기(~2cm 패드) 기준 split 가드, 공간 연속성 우선 grouping (Step 4).
 
 ---
 
@@ -139,16 +158,17 @@ DexYCB cracker box scene(idx 421470)에서 proximity 기반 contact 추출과 mi
 ```
 annotation/
 ├── compute_contact.py        # [Step 1] contact 추출 + cluster(손가락×patch) + 화살표 시각화
-├── scan_contact_scenes.py    # [Step 1.5] 전체 scene 스캔/랭킹
-├── analyze_normal_spread.py  # [Step 1.6] within-finger normal spread 분포(분할 임계각 결정)
-├── render_contact_video.py   # [Step 1.6] 30° 클러스터링+화살표 검증 비디오(turntable)
-├── solve_pressure.py         # [Step 2] min-effort SOCP → pressure + force 화살표 시각화
-├── render_pressure_video.py  # [Step 2.5] 멀티 scene pressure 예측 비디오(force 화살표)
+├── scan_contact_scenes.py    # [Step 1.5/4] 전체 scene 스캔/랭킹 (--ycb_id로 임의 물체)
+├── analyze_normal_spread.py  # [Step 1.6/4] within-finger normal spread 분포 (--ycb_id)
+├── sweep_split_angle.py      # [Step 4] 여러 물체 split 임계각 sweep (patch 크기/spread/R)
+├── render_contact_video.py   # [Step 1.6] 20° 클러스터링+화살표 검증 비디오(turntable)
+├── solve_pressure.py         # [Step 2/3] min-effort SOCP(+torque) → pressure + force 화살표 시각화
+├── render_pressure_video.py  # [Step 2.5/3] 멀티 scene pressure 예측 비디오(+torque, force 화살표)
 └── vis/
     ├── contact/            # contact_<idx>.png (화살표 포함 figure), contact_<idx>.npz,
     │                       # scan_results.npz, normal_spread.{png,npz},
     │                       # contact_clusters.mp4 (검증 비디오)
-    └── pressure/           # pressure_<idx>_<1d|2d>.png / .npz,
+    └── pressure/           # pressure_<idx>_<1d|2d>[_torque].png / .npz,
                             # pressure_clusters.mp4 (멀티 scene 비디오)
 ```
 
@@ -185,16 +205,19 @@ annotation/
 
 ### solve_pressure.py
 
-- compute_contact의 파이프라인을 import해 contact cluster를 다시 계산한 뒤 cvxpy(ECOS)로 min-effort 문제 풀이. torque equilibrium은 아직 미포함.
+- compute_contact의 파이프라인을 import해 contact cluster를 다시 계산한 뒤 cvxpy(ECOS)로 min-effort 문제 풀이. force + torque equilibrium 모두 포함(`--no_torque`로 force-only; Step 3). torque는 COM 기준 `Σ r_k×F_k=0`, COM은 `object_com()`.
 - **tangent basis:** 2d는 `generic_tangent(n)`(n에 수직인 임의 직교 basis, 항상 정의됨 → support 포함). 1d는 `friction_tangent(n,g)`(t1=anti-gravity projection; n∥g면 None → support 제외).
 - `--friction 1d`: f_t2=0, |f_t1| ≤ μf_n (계획서 formulation, QP). `--friction 2d`: ||(f_t1,f_t2)|| ≤ μf_n (full cone, SOCP). **기본 2d** (문제 #4).
-- infeasible이면 status 로깅 후 종료(계획서 방침). optimal이면 pressure_k = f_n_k / area_k 계산, 손 mesh에 inferno colormap + **접촉력 F_k 초록 화살표(force_arrows, 길이 ∝ |F_k|)** 시각화.
+- infeasible이면 status 로깅 후 종료(계획서 방침). optimal이면 pressure_k = f_n_k / area_k 계산, 손 mesh에 inferno colormap + **접촉력 F_k 초록 화살표(force_arrows)** 시각화.
+- **화살표 길이 정규화 (2026-06-27):** 예전엔 `길이 = |F_k| × 0.022 m/N`(무한대) — torque로 grip force가 ~2.3배 커지고 force tail이 무게의 최대 ~40배(p100 162N)라 화살표가 0.2~3.5m로 화면을 벗어났음. 이제 vmax와 같은 방식의 **고정 기준 + clip**: `길이 = min(|F_k|/_FORCE_ARROW_REF_N, 1) × _FORCE_ARROW_MAXLEN`(ref=10N≈cracker 무게 4N의 2.5배 → 6cm). frame마다 바꾸지 않으므로 frame/scene 간 화살표 크기 비교 가능. 분포 측정(torque ON, 152 frame/1166 contact): per-contact |F| p50 1.2 / p90 9.3 / **p100 162N**, per-frame-max p50 8.4 / p90 21.7N → ref 10N이면 보통 엄지 ~5cm, 손가락 ~0.7cm, 162N artifact는 6cm로 clip. force_arrows는 solve_pressure/render_pressure_video가 공유.
+- **pressure colormap 정규화 (2026-06-23):** 예전엔 per-scene `pressure_v.max()`로 정규화해 scene마다 색 스케일이 달랐음. 이제 **고정 ceiling `_DEFAULT_VMAX_KPA`(=30kPa, `--vmax_kpa`)** 로 통일 — `[0,vmax]`로 clip 후 나눔(OpenTouch `build_demo.py`/`load_data.py`가 고정 `max_value=3072`로 tactile을 정규화하는 방식과 동일). solve_pressure와 render_pressure_video가 같은 상수를 import해 단일 scene/멀티 scene/frame 간 색이 모두 비교 가능.
+- **vmax=30 근거 (분포 측정, 41 cracker scene · stride 10 · torque ON · 152 frame/1166 patch):** per-patch pressure는 heavy-tail(p50 1.8 / p75 8.8 / p90 23.4 / p95 39.7 / p99 169 / **p100 1998 kPa**), per-frame max는 p50 21.5 / p95 179. 극단 tail(~2MPa)은 신호가 아니라 **area artifact**(작은 patch → `fn/area` 폭발, 문제 #5)다. vmax=30이면 patch의 7.5%만 clip되고 신호 대부분(median~p90, 1.8~23kPa)이 색 gradient 안에 들어옴. 40 이상은 clip을 2.5pp밖에 못 줄이면서 typical patch(median 1.8kPa)를 거의 검정으로 밀어 low-end 대비를 잃음 → 30이 sweet spot. per-frame-max 백분위(100~500kPa)를 따라 vmax를 키우면 안 됨(소수 outlier 때문에 실제 contact가 다 검정이 됨; OpenTouch가 3072 위를 clip하는 것과 같은 취지). **vmax는 시각화 선택일 뿐, heavy tail 자체는 area convention/stray-patch 필터링으로 따로 잡아야 함.**
 
 ### render_pressure_video.py
 
 - solve_pressure(SOCP, force_arrows) + render_contact_video(FrameRenderer, compose_frame)를 재사용해 41개 cracker 시퀀스의 pressure 예측을 비디오로(vis/pressure/pressure_clusters.mp4).
 - **수직 prefilter 없음(기운 grip 포함)**, 2d는 support 포함(generic_tangent), 사용 가능 contact<2 또는 SOCP infeasible frame은 skip하고 사유별(no_contact/few_usable/infeasible) 카운트.
-- 손을 예측 pressure(inferno, **고정 vmax**=`--vmax_kpa` 기본 8kPa, frame 간 비교 가능)로 칠하고 force 화살표 추가. 좌(카메라 오버레이)/우(turntable) 2-패널. `--friction` 기본 2d.
+- 손을 예측 pressure(inferno, **고정 vmax**=`--vmax_kpa`, 기본 `_DEFAULT_VMAX_KPA`=30kPa를 solve_pressure와 공유 → scene/frame 간 비교 가능, OpenTouch 방식; 30 근거는 solve_pressure.py 절 참고)로 칠하고 force 화살표 추가. 좌(카메라 오버레이)/우(turntable) 2-패널. `--friction` 기본 2d, torque equilibrium 기본 ON(`--no_torque`로 force-only; Step 3).
 
 ---
 
@@ -224,11 +247,12 @@ python analyze_normal_spread.py
 python render_contact_video.py            # --max_seqs N 으로 일부만, --stride 로 간격 조정
 
 # 5) force/pressure 계산 + force 화살표 시각화 (단일 scene)
-python solve_pressure.py --idx 421470 --friction 2d
+python solve_pressure.py --idx 421470 --friction 2d              # force + torque (기본)
+python solve_pressure.py --idx 421470 --friction 2d --no_torque  # force-only 비교 (Step 2)
 python solve_pressure.py --idx 421470 --friction 1d   # 1D infeasible 확인용(이 scene)
 
 # 6) 멀티 scene pressure 예측 비디오 (전체 cracker, 기운 grip 포함, ~25-35분)
-python render_pressure_video.py           # --max_seqs N, --stride, --vmax_kpa 8
+python render_pressure_video.py           # --max_seqs N, --stride, --vmax_kpa 8, --no_torque
 ```
 
 ### 주요 옵션 (공통)
@@ -236,7 +260,7 @@ python render_pressure_video.py           # --max_seqs N, --stride, --vmax_kpa 8
 - `--idx` — dataset index (기본 421470. idx↔frame: 같은 시퀀스/카메라에서 연속이므로 idx = (frame 0의 idx) + frame)
 - `--thresh` — proximity threshold [m] (기본 0.005)
 - `--min_verts` — cluster(및 sub-patch) 최소 vertex 수 (기본 3; 미만 stray는 drop)
-- `--split_angle` — within-finger normal-patch 분할 임계각 [deg] (기본 30)
+- `--split_angle` — within-finger normal-patch 분할 임계각 [deg] (기본 20; Step 4 sweep 근거)
 - `--mass/--mu` — solve_pressure / render_pressure_video. 기본 0.411kg / 0.5 (cracker box)
 - `--friction {1d,2d}` — solve_pressure / render_pressure_video (기본 2d)
 - `--vmax_kpa` — render_pressure_video pressure colormap 상한 [kPa] (기본 8, 초과 clip)

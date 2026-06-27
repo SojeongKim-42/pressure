@@ -1,12 +1,17 @@
-# Scan DexYCB cracker-box scenes for frames suitable for the Simplest Case:
-# box held statically, nearly vertical, with all finger contacts on the side
-# faces (contact normals perpendicular to gravity).
+# Scan DexYCB scenes for frames suitable for the Simplest Case: an object held
+# statically and lifted off the table with several finger contacts.
 #
-# For every s0_train sequence whose grasped object is 003_cracker_box, frames
-# are sampled with a stride on one camera. Cheap pose-only prefilters (hand
-# present, box vertical, box lifted off the table) run first; contact is then
-# computed by transforming MANO vertices into the object canonical frame, so
-# the object ProximityQuery is built only once.
+# For every s0_train sequence whose grasped object matches --ycb_id (default
+# 003_cracker_box), frames are sampled with a stride on one camera. Cheap
+# pose-only prefilters (hand present, object lifted off the table, and -- only
+# for box-like objects when --vertical_min > 0 -- the object's longest axis
+# aligned with gravity) run first; contact is then computed by transforming
+# MANO vertices into the object canonical frame, so the object ProximityQuery
+# is built only once.
+#
+# The "vertical" filter is box-specific (it assumes a meaningful long axis to
+# stand upright). For smooth objects (can/bowl) pass --vertical_min 0 to skip
+# it; vert_dot is still reported for reference.
 
 import os
 
@@ -112,40 +117,47 @@ def cluster_metrics(hand_verts_cam, faces, part, sd, tri_id, obj_normals_cam,
 
 def main():
   parser = argparse.ArgumentParser(
-      description="Scan cracker-box scenes for side-face vertical grasps")
+      description="Scan grasp scenes for static lifted holds")
   parser.add_argument("--name", default="s0_train")
+  parser.add_argument("--ycb_id", type=int, default=_CRACKER_YCB_ID,
+                      help="grasped YCB object id (2=cracker, 1=can, 13=bowl)")
   parser.add_argument("--stride", type=int, default=4)
   parser.add_argument("--thresh", type=float, default=0.005)
   parser.add_argument("--min_verts", type=int, default=3)
   parser.add_argument("--vertical_min", type=float, default=0.95,
-                      help="min |box up axis . -g| to count as vertical")
+                      help="min |object long axis . -g| to count as vertical; "
+                           "0 disables (use for smooth objects)")
   parser.add_argument("--lift_min", type=float, default=0.03,
                       help="min box-center rise above its frame-0 height [m]")
-  parser.add_argument("--out",
-                      default=os.path.join(
-                          os.path.dirname(os.path.abspath(__file__)), "vis",
-                          "contact", "scan_results.npz"))
+  parser.add_argument("--out", default=None,
+                      help="defaults to vis/contact/scan_results[_<obj>].npz")
   args = parser.parse_args()
 
   dataset = get_dataset(args.name)
   cam_idx = dataset._serials.index(_SERIAL)
   mapping = dataset._mapping
 
-  obj_mesh = trimesh.load(dataset.obj_file[_CRACKER_YCB_ID], process=False,
+  ycb_id = args.ycb_id
+  obj_name = dataset.ycb_classes[ycb_id]
+  if args.out is None:
+    tag = "_%s" % obj_name if ycb_id != _CRACKER_YCB_ID else ""
+    args.out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vis",
+                            "contact", "scan_results%s.npz" % tag)
+  obj_mesh = trimesh.load(dataset.obj_file[ycb_id], process=False,
                           force="mesh")
   pq = trimesh.proximity.ProximityQuery(obj_mesh)
   up_axis = int(np.argmax(obj_mesh.extents))
-  print("cracker box extents %s -> up axis %d" %
-        (np.round(obj_mesh.extents, 3), up_axis))
+  print("%s extents %s -> long axis %d" %
+        (obj_name, np.round(obj_mesh.extents, 3), up_axis))
 
   hands = HandModel()
 
-  # Sequences grasping the cracker box.
+  # Sequences grasping the target object.
   seq_ids = [
       s for s in range(len(dataset._sequences))
-      if dataset._ycb_ids[s][dataset._ycb_grasp_ind[s]] == _CRACKER_YCB_ID
+      if dataset._ycb_ids[s][dataset._ycb_grasp_ind[s]] == ycb_id
   ]
-  print("%d cracker-box sequences in %s" % (len(seq_ids), args.name))
+  print("%d %s sequences in %s" % (len(seq_ids), obj_name, args.name))
 
   rows = []
   t0 = time.time()
@@ -187,7 +199,9 @@ def main():
       lift = z_tag - z0
       if np.all(label["pose_m"] == 0.0):
         continue
-      if vert_dot < args.vertical_min or lift < args.lift_min:
+      if lift < args.lift_min:
+        continue
+      if args.vertical_min > 0 and vert_dot < args.vertical_min:
         continue
 
       # Contact in the object canonical frame.

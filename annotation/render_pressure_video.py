@@ -1,20 +1,24 @@
-# Render a video of physics-based pressure prediction across many cracker-box
-# scenes (Research Plan: Simplest Case, step 2 -- generalized beyond the clean
-# vertical-hold case).
+# Render a video of physics-based pressure prediction across many grasp scenes
+# of one object (Research Plan: Simplest Case, step 2 -- generalized beyond the
+# clean vertical-hold cracker case to any --ycb_id).
 #
-# For every s0_train cracker-box sequence, each frame (at a stride) where the
-# hand and box are present is processed with the full pipeline:
+# For every s0_train sequence grasping the target object, each frame (at a
+# stride) where the hand and object are present is processed with the pipeline:
 #   detect_contact -> cluster_stats (finger x normal-patch) -> per-contact
-#   friction tangent -> min-effort SOCP (2D friction) -> pressure_k.
+#   friction tangent -> min-effort SOCP (2D friction + torque equilibrium about
+#   the object COM, --no_torque for force-only) -> pressure_k.
 # The hand is colored by predicted pressure (inferno, FIXED vmax so frames are
 # comparable) and the solved contact force F_k is drawn as a green arrow
 # (length proportional to |F_k|). Left = camera-view overlay, right = gravity
 # turntable. Frames are concatenated into one mp4.
 #
-# Unlike the clean validation we do NOT require the box to be vertical -- tilted
-# holds are included. SUPPORT contacts (n_k nearly parallel to gravity, t_k
-# undefined) are excluded per the plan; frames left with <2 usable contacts, or
-# whose SOCP is infeasible, are skipped (counted and reported).
+# Unlike the clean validation we do NOT require a vertical pose -- tilted holds
+# are included. SUPPORT contacts (n_k nearly parallel to gravity, t_k undefined)
+# are excluded per the plan; frames left with <2 usable contacts, or whose SOCP
+# is infeasible, are skipped (counted and reported).
+#
+# NOTE: --mass and --mu default to cracker; pass per-object values for others
+# (e.g. master_chef_can: --ycb_id 1 --mass 0.414 --mu 1.11).
 
 import os
 
@@ -34,8 +38,9 @@ from dex_ycb_toolkit.factory import get_dataset
 
 from compute_contact import (cluster_stats, detect_contact, gravity_in_camera,
                              load_hand)
-from solve_pressure import (_DEFAULT_MASS, _DEFAULT_MU, _GRAVITY, force_arrows,
-                            friction_tangent, generic_tangent, solve_min_effort)
+from solve_pressure import (_DEFAULT_MASS, _DEFAULT_MU, _DEFAULT_VMAX_KPA,
+                            _GRAVITY, force_arrows, friction_tangent,
+                            generic_tangent, object_com, solve_min_effort)
 from render_contact_video import FrameRenderer, compose_frame
 from scan_contact_scenes import _CRACKER_YCB_ID, _SERIAL
 
@@ -60,7 +65,7 @@ def pressure_hand_mesh(hand_mesh, kept, pressures_pa, vmax_pa):
 # 한 frame의 contact→SOCP. 풀리면 (kept, fn,ft1,ft2, normals,t1,t2, pressures, n_support),
 # 안 풀리면 (None, 사유). 사유: 'no_contact' / 'few_usable' / 'infeasible'.
 def solve_frame(hand_mesh, obj_mesh, finger, g_cam, thresh, min_verts, mass, mu,
-                friction):
+                friction, torque=True):
     sd, contact, tri_id, closest = detect_contact(hand_mesh, obj_mesh, thresh)
     if contact.sum() == 0:
         return None, "no_contact"
@@ -82,8 +87,11 @@ def solve_frame(hand_mesh, obj_mesh, finger, g_cam, thresh, min_verts, mass, mu,
         t2s.append(t[1])
     if len(kept) < 2:
         return None, "few_usable"
+    # Torque balanced about the object COM: r_k = cluster centroid - COM.
+    com, _ = object_com(obj_mesh)
+    arms = np.array([c["centroid"] for c in kept]) - com
     fn, ft1, ft2, status = solve_min_effort(normals, t1s, t2s, g_cam, mass, mu,
-                                            friction)
+                                            friction, arms=arms, torque=torque)
     if fn is None:
         return None, "infeasible"
     areas = np.array([c["area_m2"] for c in kept])
@@ -95,36 +103,48 @@ def main():
     parser = argparse.ArgumentParser(
         description="Multi-scene physics pressure prediction video")
     parser.add_argument("--name", default="s0_train")
+    parser.add_argument("--ycb_id", type=int, default=_CRACKER_YCB_ID,
+                        help="grasped YCB object id (2=cracker, 1=can, 13=bowl)")
     parser.add_argument("--stride", type=int, default=2)
     parser.add_argument("--thresh", type=float, default=0.005)
     parser.add_argument("--min_verts", type=int, default=3)
     parser.add_argument("--mass", type=float, default=_DEFAULT_MASS)
     parser.add_argument("--mu", type=float, default=_DEFAULT_MU)
     parser.add_argument("--friction", choices=["1d", "2d"], default="2d")
-    parser.add_argument("--vmax_kpa", type=float, default=8.0,
-                        help="fixed pressure colormap max [kPa] (comparable frames)")
+    parser.add_argument("--no_torque", dest="torque", action="store_false",
+                        help="disable torque equilibrium (force-only).")
+    parser.set_defaults(torque=True)
+    parser.add_argument("--vmax_kpa", type=float, default=_DEFAULT_VMAX_KPA,
+                        help="fixed pressure colormap max [kPa], shared with "
+                             "solve_pressure (comparable across scenes/frames)")
     parser.add_argument("--max_seqs", type=int, default=0)
     parser.add_argument("--fps", type=int, default=6)
     parser.add_argument("--scale", type=float, default=0.75)
-    parser.add_argument("--out",
-                        default=os.path.join(
-                            os.path.dirname(os.path.abspath(__file__)), "vis",
-                            "pressure", "pressure_clusters.mp4"))
+    parser.add_argument("--out", default=None,
+                        help="defaults to vis/pressure/pressure_clusters[_<obj>].mp4")
     args = parser.parse_args()
     vmax_pa = args.vmax_kpa * 1000.0
 
     dataset = get_dataset(args.name)
+    ycb_id = args.ycb_id
+    obj_name = dataset.ycb_classes[ycb_id]
+    if args.out is None:
+        tag = "_%s" % obj_name if ycb_id != _CRACKER_YCB_ID else ""
+        args.out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "vis", "pressure",
+                                "pressure_clusters%s.mp4" % tag)
     cam_idx = dataset._serials.index(_SERIAL)
     mapping = dataset._mapping
-    obj_canon = trimesh.load(dataset.obj_file[_CRACKER_YCB_ID], process=False,
+    obj_canon = trimesh.load(dataset.obj_file[ycb_id], process=False,
                              force="mesh")
     seq_ids = [s for s in range(len(dataset._sequences))
                if dataset._ycb_ids[s][dataset._ycb_grasp_ind[s]]
-               == _CRACKER_YCB_ID]
+               == ycb_id]
     if args.max_seqs:
         seq_ids = seq_ids[:args.max_seqs]
-    print("%d cracker-box sequences (stride %d, %s friction, vmax %.0f kPa)" %
-          (len(seq_ids), args.stride, args.friction, args.vmax_kpa))
+    print("%d %s sequences (stride %d, %s friction, torque=%s, "
+          "vmax %.0f kPa)" % (len(seq_ids), obj_name, args.stride,
+                              args.friction, args.torque, args.vmax_kpa))
 
     renderer, writer = None, None
     n_written = 0
@@ -157,7 +177,7 @@ def main():
 
             res, status = solve_frame(hand_mesh, obj_mesh, finger, g_cam,
                                       args.thresh, args.min_verts, args.mass,
-                                      args.mu, args.friction)
+                                      args.mu, args.friction, args.torque)
             if res is None:
                 skip[status] = skip.get(status, 0) + 1
                 continue

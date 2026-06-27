@@ -2,11 +2,11 @@
 
 ## 연구 목표
 
-RGB 기반 HOI 영상에 physics-based pseudo pressure label (N/m²)을 자동으로 생성하는 pipeline을 구축하는 것이 목표다. 별도의 pressure sensor 없이 물체의 mass, friction coefficient, 손과 물체의 mesh 정보만을 이용해 각 contact point에서의 pressure를 추정한다. 이렇게 생성된 pseudo-label은 대규모 egocentric HOI dataset에 적용 가능한 weakly supervised training signal로 활용한다.
+최종 목표는 in the wild에서 vision based로 pressure를 예측하는 foundation model을 개발하는 것이다. 현재는 fine-grained pressure 데이터셋이 거의 없고, 있는 것들도 대부분 실험실 환경이다. 따라서 기존에 존재하는 RGB 기반 HOI dataset을 활용하고자 physics-based pseudo pressure label (N/m²)을 자동으로 생성하는 pipeline을 구축하는 것이 목표다. 별도의 pressure sensor 없이 물체의 mass, friction coefficient, 손과 물체의 mesh 정보만을 이용해 각 contact point에서의 pressure를 추정한다. 이렇게 생성된 pseudo-label은 대규모 egocentric HOI dataset에 적용하여, foundation model의 weakly supervised training signal로 활용한다. 
 
 ## 현재 Scope
 
-Dataset은 hand/object mesh annotation의 정확도를 기준으로 DexYCB를 사용한다. 현재는 static holding만 가정하여 가속도 a ≈ 0으로 둔다.
+Pseudo-labeling을 시작하는 첫 Dataset은 hand/object mesh annotation의 정확도를 기준으로 DexYCB를 사용한다. 현재는 static holding만 가정하여 가속도 a ≈ 0으로 둔다.
 
 > **구현 결정 (2026-06-18):** Friction은 **2D(full cone)를 기본**으로 채택한다. 당초 계획한 1D friction(t_k = 중력 반대방향 projection)은 (a) 깔끔한 antipodal 그립에서 force equilibrium조차 infeasible해지고, (b) n_k ∥ gravity일 때 t_k가 undefined가 되어 **support case를 배제해야 했다**. 2D에서는 마찰력 집합이 등방적 disk라 tangent basis 방향이 해에 무관하므로, n_k에 수직인 임의 직교 basis를 쓰면 **support case(손이 물체를 일부 떠받쳐 grip force가 줄어드는 경우)도 그대로 풀린다** — min-effort 해가 위로 향한 normal force로 무게를 받쳐 squeeze를 줄이는 것을 자동으로 잡아낸다. 따라서 support case는 더 이상 scope에서 제외하지 않는다 (1D 모드를 명시적으로 쓸 때만 제외).
 
@@ -42,7 +42,7 @@ subject to: Σ_k F_k = -mg_vec
 
 ## Known Limitations
 
-Minimum L2 norm은 F_rnn = 0으로 두는 것과 수학적으로 동치다. 즉 "실제 인간의 grasp behavior prior"가 전혀 없는 formulation이다. 실제 인간은 필요한 force보다 더 크게 쥐는 경향이 있으므로 이 방법은 systematic underestimation에 가까울 수 있다. 이를 임의의 scaling factor로 수정하는 것은 근거가 없으므로, limitation으로 명시하고 이후 OPENTOUCH validation에서 실제 distribution과 비교하여 data-driven correction을 검토한다. 또한 1D friction 가정은 lateral friction을 표현하지 못해 일부 grasp에서 infeasibility를 유발했고(특히 깔끔한 antipodal 그립), **2026-06-18부터 2D friction을 기본으로 채택**해 이를 해결했다 (위 Formulation 노트 참고). 남은 limitation: torque equilibrium 미포함, contact area 정의에 따른 pressure 스케일 민감도, edge-graze artifact (Research context.md 문제 #5/#7).
+Minimum L2 norm은 F_rnn = 0으로 두는 것과 수학적으로 동치다. 즉 "실제 인간의 grasp behavior prior"가 전혀 없는 formulation이다. 실제 인간은 필요한 force보다 더 크게 쥐는 경향이 있으므로 이 방법은 systematic underestimation에 가까울 수 있다. 이를 임의의 scaling factor로 수정하는 것은 근거가 없으므로, limitation으로 명시하고 이후 OPENTOUCH validation에서 실제 distribution과 비교하여 data-driven correction을 검토한다. 또한 1D friction 가정은 lateral friction을 표현하지 못해 일부 grasp에서 infeasibility를 유발했고(특히 깔끔한 antipodal 그립), **2026-06-18부터 2D friction을 기본으로 채택**해 이를 해결했다 (위 Formulation 노트 참고). 2026-06-23부터 torque equilibrium(`Σ_k r_k × F_k = 0`, COM 기준)도 포함했다 — 회전 평형을 강제하면 grip force가 올라가(idx 421470에서 ≈2.3배) min-effort의 under-grip 경향을 일부 보정한다(Research context.md Step 3). 남은 limitation: contact area 정의에 따른 pressure 스케일 민감도, edge-graze artifact, torque의 COM 정확도 민감도 (Research context.md 문제 #5/#7).
 
 ## 검증 계획: Simplest Case
 
@@ -62,4 +62,4 @@ n_k의 z 성분이 거의 0인지 (n_k ⊥ gravity) 확인하여 현재 simplifi
 
 ## 이후 단계
 
-단순 케이스 검증 후 torque equilibrium을 다시 포함하고, DexYCB 전체 cracker box scene으로 확장하여 SOCP infeasibility rate를 측정한다. 이후 다른 object (다양한 material, mass)로 확장하고, 최종적으로 ContactPose에서 physics pseudo-label 품질을 확인한 뒤 vision-only 모델 학습 → OPENTOUCH validation 순서로 진행한다.
+단순 케이스 검증 후 torque equilibrium을 다시 포함했고(2026-06-23 완료, Research context.md Step 3), 이제 DexYCB 전체 cracker box scene으로 확장하여 SOCP infeasibility rate(torque ON/OFF 포함)를 측정한다. 이후 다른 object (다양한 material, mass)로 확장하고, 최종적으로 ContactPose에서 physics pseudo-label 품질을 확인한 뒤 vision-only 모델 학습 → OPENTOUCH validation 순서로 진행한다.

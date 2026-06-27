@@ -45,7 +45,7 @@ class ColorTracker:
     contact-normal angle) and reuses its color id; unmatched clusters get a
     new id. reset() is called at each sequence boundary."""
 
-    def __init__(self, angle_thresh=30.0):
+    def __init__(self, angle_thresh=_SPLIT_ANGLE_DEG):
         self.cos_thresh = np.cos(np.radians(angle_thresh))
         self.reset()
 

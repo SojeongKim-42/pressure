@@ -31,8 +31,7 @@ import trimesh.proximity
 
 from dex_ycb_toolkit.factory import get_dataset
 
-from compute_contact import (_FINGER_NAMES, _PART_TO_FINGER,
-                             contact_directions)
+from compute_contact import _FINGER_NAMES, _PART_TO_FINGER, contact_directions
 from scan_contact_scenes import HandModel, _CRACKER_YCB_ID, _SERIAL
 
 # Fingers only (skip palm): palm contact is not a finger contact patch.
@@ -41,43 +40,71 @@ _FINGER_IDS = [fi for fi, name in enumerate(_FINGER_NAMES) if name != "palm"]
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Within-finger object-normal angular spread distribution")
+        description="Within-finger object-normal angular spread distribution"
+    )
     parser.add_argument("--name", default="s0_train")
-    parser.add_argument("--stride", type=int, default=4,
-                        help="frame stride per sequence")
-    parser.add_argument("--thresh", type=float, default=0.005,
-                        help="proximity threshold in meters")
-    parser.add_argument("--min_verts", type=int, default=3,
-                        help="min contact vertices per finger to include")
-    parser.add_argument("--max_seqs", type=int, default=0,
-                        help="limit sequences for a quick run (0 = all)")
-    parser.add_argument("--out_dir",
-                        default=os.path.join(
-                            os.path.dirname(os.path.abspath(__file__)),
-                            "vis", "contact"))
+    parser.add_argument(
+        "--ycb_id", type=int, default=_CRACKER_YCB_ID,
+        help="grasped YCB object id (2=cracker, 1=can, 13=bowl)"
+    )
+    parser.add_argument(
+        "--stride", type=int, default=4, help="frame stride per sequence"
+    )
+    parser.add_argument(
+        "--thresh", type=float, default=0.005, help="proximity threshold in meters"
+    )
+    parser.add_argument(
+        "--min_verts",
+        type=int,
+        default=3,
+        help="min contact vertices per finger to include",
+    )
+    parser.add_argument(
+        "--max_seqs",
+        type=int,
+        default=0,
+        help="limit sequences for a quick run (0 = all)",
+    )
+    parser.add_argument(
+        "--out_dir",
+        default=os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "vis", "contact"
+        ),
+    )
     args = parser.parse_args()
 
     dataset = get_dataset(args.name)
     cam_idx = dataset._serials.index(_SERIAL)
     mapping = dataset._mapping
 
-    obj_mesh = trimesh.load(dataset.obj_file[_CRACKER_YCB_ID], process=False,
-                            force="mesh")
+    ycb_id = args.ycb_id
+    obj_name = dataset.ycb_classes[ycb_id]
+    obj_mesh = trimesh.load(
+        dataset.obj_file[ycb_id], process=False, force="mesh"
+    )
     pq = trimesh.proximity.ProximityQuery(obj_mesh)
     hands = HandModel()
 
-    seq_ids = [s for s in range(len(dataset._sequences))
-               if dataset._ycb_ids[s][dataset._ycb_grasp_ind[s]]
-               == _CRACKER_YCB_ID]
+    seq_ids = [
+        s
+        for s in range(len(dataset._sequences))
+        if dataset._ycb_ids[s][dataset._ycb_grasp_ind[s]] == ycb_id
+    ]
     if args.max_seqs:
-        seq_ids = seq_ids[:args.max_seqs]
-    print("%d cracker-box sequences in %s (stride %d, thresh %.1f mm)" %
-          (len(seq_ids), args.name, args.stride, args.thresh * 1000))
+        seq_ids = seq_ids[: args.max_seqs]
+    print(
+        "%d %s sequences in %s (stride %d, thresh %.1f mm)"
+        % (len(seq_ids), obj_name, args.name, args.stride, args.thresh * 1000)
+    )
 
-    per_vertex_dev = []   # angle of each contact vertex's obj-normal from finger mean
-    per_finger_max = []   # per (frame,finger): max deviation (sensitive to 1 stray vertex)
-    per_finger_p90 = []   # per (frame,finger): 90th-pct deviation (robust multi-patch signal)
-    records = []          # (idx, frame, side, finger, n_verts, max_dev, p90_dev)
+    per_vertex_dev = []  # angle of each contact vertex's obj-normal from finger mean
+    per_finger_max = (
+        []
+    )  # per (frame,finger): max deviation (sensitive to 1 stray vertex)
+    per_finger_p90 = (
+        []
+    )  # per (frame,finger): 90th-pct deviation (robust multi-patch signal)
+    records = []  # (idx, frame, side, finger, n_verts, max_dev, p90_dev)
     n_frames = 0
     t0 = time.time()
 
@@ -106,8 +133,10 @@ def main():
             hand_cam = hands.verts(side, betas, label["pose_m"])
             hand_obj = (hand_cam - t_y) @ R_y
             closest, dist, tri_id = pq.on_surface(hand_obj)
-            behind = np.einsum("ij,ij->i", hand_obj - closest,
-                               obj_mesh.face_normals[tri_id]) < 0
+            behind = (
+                np.einsum("ij,ij->i", hand_obj - closest, obj_mesh.face_normals[tri_id])
+                < 0
+            )
             sd = np.where(behind, dist, -dist)
             contact = sd > -args.thresh
             if contact.sum() == 0:
@@ -127,25 +156,41 @@ def main():
                 per_vertex_dev.extend(ang.tolist())
                 per_finger_max.append(float(ang.max()))
                 per_finger_p90.append(float(np.percentile(ang, 90)))
-                records.append((int(idx), f, side, _FINGER_NAMES[fi],
-                                len(vsel), float(ang.max()),
-                                float(np.percentile(ang, 90))))
-        print("  seq %d/%d done, %d frames, %d finger-clusters  [%.0fs]" %
-              (seq_ids.index(s) + 1, len(seq_ids), n_frames, len(per_finger_max),
-               time.time() - t0))
+                records.append(
+                    (
+                        int(idx),
+                        f,
+                        side,
+                        _FINGER_NAMES[fi],
+                        len(vsel),
+                        float(ang.max()),
+                        float(np.percentile(ang, 90)),
+                    )
+                )
+        print(
+            "  seq %d/%d done, %d frames, %d finger-clusters  [%.0fs]"
+            % (
+                seq_ids.index(s) + 1,
+                len(seq_ids),
+                n_frames,
+                len(per_finger_max),
+                time.time() - t0,
+            )
+        )
 
     per_vertex_dev = np.array(per_vertex_dev)
     per_finger_max = np.array(per_finger_max)
     per_finger_p90 = np.array(per_finger_p90)
-    print("\n%d contact frames, %d finger-clusters, %d contact vertices" %
-          (n_frames, len(per_finger_max), len(per_vertex_dev)))
+    print(
+        "\n%d contact frames, %d finger-clusters, %d contact vertices"
+        % (n_frames, len(per_finger_max), len(per_vertex_dev))
+    )
 
     # ----- numbers -----
     def pct_table(name, arr):
         qs = [50, 75, 90, 95, 99]
         print("\n%s deviation from finger-mean object-normal [deg]:" % name)
-        print("  mean %.1f   min %.1f   max %.1f" %
-              (arr.mean(), arr.min(), arr.max()))
+        print("  mean %.1f   min %.1f   max %.1f" % (arr.mean(), arr.min(), arr.max()))
         print("  " + "  ".join("p%d %.1f" % (q, np.percentile(arr, q)) for q in qs))
 
     pct_table("per-vertex", per_vertex_dev)
@@ -155,15 +200,22 @@ def main():
     print("\nfraction of finger-clusters exceeding T  (MAX vs P90 signal):")
     print("  %6s %12s %12s" % ("T[deg]", "by MAX", "by P90"))
     for T in (5, 10, 15, 20, 30, 45, 60, 90):
-        print("  %6d %11.1f%% %11.1f%%" %
-              (T, 100.0 * (per_finger_max > T).mean(),
-               100.0 * (per_finger_p90 > T).mean()))
+        print(
+            "  %6d %11.1f%% %11.1f%%"
+            % (
+                T,
+                100.0 * (per_finger_max > T).mean(),
+                100.0 * (per_finger_p90 > T).mean(),
+            )
+        )
 
     # Multi-patch suspects (largest within-finger spread).
     records.sort(key=lambda r: -r[5])
     print("\nTop 15 widest-spread finger-clusters (candidate multi-patch):")
-    print("  %8s %5s %5s %-7s %6s %8s %8s" %
-          ("idx", "frame", "side", "finger", "nverts", "maxdev", "p90dev"))
+    print(
+        "  %8s %5s %5s %-7s %6s %8s %8s"
+        % ("idx", "frame", "side", "finger", "nverts", "maxdev", "p90dev")
+    )
     for r in records[:15]:
         print("  %8d %5d %5s %-7s %6d %8.1f %8.1f" % r)
 
@@ -178,39 +230,61 @@ def main():
             ax.set_yscale("log")
         ax.set_xlabel(xlabel)
         ax.set_title(title)
-        for q in qs:
-            x = np.percentile(data, q)
-            ax.axvline(x, color="k", ls="--", lw=0.8)
-            ax.text(x, ax.get_ylim()[1], " p%d=%.0f" % (q, x),
-                    rotation=90, va="top", fontsize=8)
+        # for q in qs:
+        # x = np.percentile(data, q)
+        # ax.axvline(x, color="k", ls="--", lw=0.8)
+        # ax.text(x, ax.get_ylim()[1], " p%d=%.0f" % (q, x),
+        # rotation=90, va="top", fontsize=8)
 
-    panel(axes[0], per_vertex_dev, "Per-vertex object-normal deviation",
-          "per-vertex deviation from finger-mean [deg]", "#1f78b4",
-          (90, 95, 99), logy=True)
+    panel(
+        axes[0],
+        per_vertex_dev,
+        "Per-vertex object-normal deviation",
+        "per-vertex deviation from finger-mean [deg]",
+        "#1f78b4",
+        (90, 95, 99),
+        logy=True,
+    )
     axes[0].set_ylabel("contact vertices (log)")
-    panel(axes[1], per_finger_max,
-          "Per-finger MAX spread (sensitive to stray verts)",
-          "per-finger MAX deviation [deg]", "#e31a1c", (50, 75, 90))
+    panel(
+        axes[1],
+        per_finger_max,
+        "Per-finger MAX spread (sensitive to stray verts)",
+        "per-finger MAX deviation [deg]",
+        "#e31a1c",
+        (50, 75, 90),
+    )
     axes[1].set_ylabel("finger-clusters")
-    panel(axes[2], per_finger_p90,
-          "Per-finger P90 spread (robust split signal)",
-          "per-finger P90 deviation [deg]", "#33a02c", (50, 75, 90))
+    panel(
+        axes[2],
+        per_finger_p90,
+        "Per-finger P90 spread (robust split signal)",
+        "per-finger P90 deviation [deg]",
+        "#33a02c",
+        (50, 75, 90),
+    )
     axes[2].set_ylabel("finger-clusters")
 
-    fig.suptitle("Within-finger object-normal spread  (%d clusters, %d frames, %s)"
-                 % (len(per_finger_max), n_frames, args.name))
+    fig.suptitle(
+        "Within-finger contact-normal spread  (%s, %d clusters, %d frames, %s)"
+        % (obj_name, len(per_finger_max), n_frames, args.name)
+    )
     fig.tight_layout()
-    out_png = os.path.join(args.out_dir, "normal_spread.png")
+    tag = "_%s" % obj_name if ycb_id != _CRACKER_YCB_ID else ""
+    out_png = os.path.join(args.out_dir, "normal_spread%s.png" % tag)
     fig.savefig(out_png, dpi=150, bbox_inches="tight")
     print("\nsaved %s" % out_png)
 
-    out_npz = os.path.join(args.out_dir, "normal_spread.npz")
-    np.savez(out_npz,
-             per_vertex_dev=per_vertex_dev,
-             per_finger_max=per_finger_max,
-             per_finger_p90=per_finger_p90,
-             records=np.array(records, dtype=object),
-             thresh=args.thresh, stride=args.stride)
+    out_npz = os.path.join(args.out_dir, "normal_spread%s.npz" % tag)
+    np.savez(
+        out_npz,
+        per_vertex_dev=per_vertex_dev,
+        per_finger_max=per_finger_max,
+        per_finger_p90=per_finger_p90,
+        records=np.array(records, dtype=object),
+        thresh=args.thresh,
+        stride=args.stride,
+    )
     print("saved %s" % out_npz)
 
 
