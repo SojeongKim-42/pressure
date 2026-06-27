@@ -6,6 +6,9 @@
 *.log
 *.png
 *.mp4
+*.txt
+hand-force-datasets.md
+scan_result.md
 CLAUDE.md
 setup.sh
 datasets/
