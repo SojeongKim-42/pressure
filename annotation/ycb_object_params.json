@@ -149,7 +149,7 @@
       "ycb_id": 19,
       "model": "051_large_clamp",
       "name": "Large Clamp",
-      "material": "metal",
+      "material": "plastic",
       "mass_kg": 0.125,
       "mu": 0.5
     },
@@ -157,7 +157,7 @@
       "ycb_id": 20,
       "model": "052_extra_large_clamp",
       "name": "Extra Large Clamp",
-      "material": "metal",
+      "material": "plastic",
       "mass_kg": 0.202,
       "mu": 0.5
     },

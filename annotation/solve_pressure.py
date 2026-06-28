@@ -200,6 +200,58 @@ def solve_min_effort(
     return fn.value, ft1.value, ft2.value, prob.status
 
 
+# 한 frame의 contact→SOCP. 풀리면 (kept, fn,ft1,ft2, normals,t1,t2, pressures, n_support),
+# 안 풀리면 (None, 사유). 사유: 'no_contact' / 'few_usable' / 'infeasible'.
+# render_pressure_video.py(시각화)와 precompute_pressure.py(값 저장)가 공유하는,
+# 한 프레임에 대한 순수 물리 풀이. detect_contact→cluster_stats(손가락×patch)→
+# per-contact friction tangent→min-effort SOCP(2D + torque about COM)→pressure_k.
+def solve_frame(
+    hand_mesh,
+    obj_mesh,
+    finger,
+    g_cam,
+    thresh,
+    min_verts,
+    mass,
+    mu,
+    friction,
+    torque=True,
+):
+    sd, contact, tri_id, closest = detect_contact(hand_mesh, obj_mesh, thresh)
+    if contact.sum() == 0:
+        return None, "no_contact"
+    clusters = cluster_stats(
+        hand_mesh, obj_mesh, finger, contact, sd, tri_id, closest, g_cam, min_verts
+    )
+    kept, normals, t1s, t2s = [], [], [], []
+    n_support = 0
+    for c in clusters:
+        if friction == "1d":
+            t = friction_tangent(c["n_obj"], g_cam)
+            if t is None:  # n_k ∥ gravity → 1D singularity, support 제외
+                n_support += 1
+                continue
+        else:  # 2D: generic basis, support contact 포함
+            t = generic_tangent(c["n_obj"])
+        kept.append(c)
+        normals.append(c["n_obj"])
+        t1s.append(t[0])
+        t2s.append(t[1])
+    if len(kept) < 2:
+        return None, "few_usable"
+    # Torque balanced about the object COM: r_k = cluster centroid - COM.
+    com, _ = object_com(obj_mesh)
+    arms = np.array([c["centroid"] for c in kept]) - com
+    fn, ft1, ft2, status = solve_min_effort(
+        normals, t1s, t2s, g_cam, mass, mu, friction, arms=arms, torque=torque
+    )
+    if fn is None:
+        return None, "infeasible"
+    areas = np.array([c["area_m2"] for c in kept])
+    pressures = fn / areas
+    return (kept, fn, ft1, ft2, normals, t1s, t2s, pressures, n_support), status
+
+
 def pressure_colors(hand_mesh, clusters, pressures_pa, vmax_pa, cmap_name="inferno"):
     """Per-vertex RGBA colors: cluster pressure on contact verts, gray rest.
 
