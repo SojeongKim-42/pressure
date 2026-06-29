@@ -34,6 +34,7 @@ os.environ.setdefault("DEX_YCB_DIR", "/datasets/dexycb")
 import argparse
 import json
 import time
+from tqdm import tqdm
 
 import numpy as np
 import trimesh
@@ -44,10 +45,12 @@ from compute_contact import gravity_in_camera, load_hand
 from solve_pressure import _GRAVITY, object_com, solve_frame
 from scan_contact_scenes import _SERIAL
 
-_PARAMS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "ycb_object_params.json")
-_DEFAULT_OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "pressure_labels")
+_PARAMS_JSON = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "ycb_object_params.json"
+)
+_DEFAULT_OUT_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "pressure_labels"
+)
 
 
 # ycb_object_params.json -> {ycb_id: {model, name, mass_kg, mu, material}}.
@@ -73,7 +76,7 @@ def load_pressure_npz(path):
 def frame_contacts(frames, contacts, row):
     start = int(frames["contact_start"][row])
     n = int(frames["n_contacts"][row])
-    return {k: v[start:start + n] for k, v in contacts.items()}
+    return {k: v[start : start + n] for k, v in contacts.items()}
 
 
 def compute_object(dataset, ycb_id, params, args):
@@ -98,17 +101,45 @@ def compute_object(dataset, ycb_id, params, args):
     )
 
     # per-frame columns
-    F = {k: [] for k in ("idx", "seq", "frame", "side", "status", "n_support",
-                         "fn_sum", "weight", "contact_start", "n_contacts")}
+    F = {
+        k: []
+        for k in (
+            "idx",
+            "seq",
+            "frame",
+            "side",
+            "status",
+            "n_support",
+            "fn_sum",
+            "weight",
+            "contact_start",
+            "n_contacts",
+        )
+    }
     # per-contact columns (flat across all frames of this object)
-    C = {k: [] for k in ("label", "finger", "centroid", "area_m2", "normal",
-                         "t1", "t2", "fn", "ft1", "ft2", "pressure_pa", "verts")}
+    C = {
+        k: []
+        for k in (
+            "label",
+            "finger",
+            "centroid",
+            "area_m2",
+            "normal",
+            "t1",
+            "t2",
+            "fn",
+            "ft1",
+            "ft2",
+            "pressure_pa",
+            "verts",
+        )
+    }
     skip = {"no_contact": 0, "few_usable": 0, "infeasible": 0}
     n_solved = 0  # 접촉이 풀려 pressure 값이 있는 프레임 수
     n_stored = 0  # 저장된 frame 행 수 (solved + unsolved; --solved_only면 solved만)
     t0 = time.time()
 
-    for s in seq_ids:
+    for s in tqdm(seq_ids):
         seq_name = dataset._sequences[s]
         grasp_ind = dataset._ycb_grasp_ind[s]
         sel = np.where((mapping[:, 0] == s) & (mapping[:, 1] == cam_idx))[0]
@@ -128,12 +159,22 @@ def compute_object(dataset, ycb_id, params, args):
 
             hand_mesh, finger = load_hand(sample, label)
             obj_mesh = obj_canon.copy()
-            obj_mesh.apply_transform(np.vstack((pose_y, [0, 0, 0, 1])).astype(np.float64))
+            obj_mesh.apply_transform(
+                np.vstack((pose_y, [0, 0, 0, 1])).astype(np.float64)
+            )
             g_cam = gravity_in_camera(sample, dataset.data_dir)
 
             res, status = solve_frame(
-                hand_mesh, obj_mesh, finger, g_cam, args.thresh, args.min_verts,
-                mass, mu, args.friction, args.torque,
+                hand_mesh,
+                obj_mesh,
+                finger,
+                g_cam,
+                args.thresh,
+                args.min_verts,
+                mass,
+                mu,
+                args.friction,
+                args.torque,
             )
             # 손·물체가 있는 프레임은 (풀리든 안 풀리든) frame 행을 항상 남긴다.
             # 풀이 실패(no_contact/few_usable/infeasible)는 contact 0개로 status만 기록 →
@@ -185,14 +226,23 @@ def compute_object(dataset, ycb_id, params, args):
             n_seq += 1
         print(
             "  seq %d/%d %s: %d frames  [%d stored / %d solved, skip %s, %.0fs]"
-            % (seq_ids.index(s) + 1, len(seq_ids), seq_name, n_seq, n_stored,
-               n_solved, skip, time.time() - t0)
+            % (
+                seq_ids.index(s) + 1,
+                len(seq_ids),
+                seq_name,
+                n_seq,
+                n_stored,
+                n_solved,
+                skip,
+                time.time() - t0,
+            )
         )
     return F, C, skip, n_solved, n_stored
 
 
-def save_pressure_npz(out_path, ycb_id, obj_name, params, args, F, C, skip,
-                      n_solved, n_stored):
+def save_pressure_npz(
+    out_path, ycb_id, obj_name, params, args, F, C, skip, n_solved, n_stored
+):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     arrs = {}
     # per-frame table (prefix f_), per-contact table (prefix c_).
@@ -234,8 +284,8 @@ def save_pressure_npz(out_path, ycb_id, obj_name, params, args, F, C, skip,
     arrs["meta_split"] = np.array(get_split_angle())
     arrs["meta_dataset"] = np.array(args.name)
     arrs["meta_solved_only"] = np.array(bool(args.solved_only))
-    arrs["meta_n_solved"] = np.array(n_solved)   # pressure 값이 있는 프레임 수
-    arrs["meta_n_stored"] = np.array(n_stored)   # 저장된 frame 행 수(solved+unsolved)
+    arrs["meta_n_solved"] = np.array(n_solved)  # pressure 값이 있는 프레임 수
+    arrs["meta_n_stored"] = np.array(n_stored)  # 저장된 frame 행 수(solved+unsolved)
     arrs["meta_skip"] = np.array(skip)  # dict -> 0-d object
     np.savez_compressed(out_path, **arrs)
     return out_path
@@ -244,6 +294,7 @@ def save_pressure_npz(out_path, ycb_id, obj_name, params, args, F, C, skip,
 # compute_contact._SPLIT_ANGLE_DEG (실제 cluster_stats 기본값)을 기록용으로 읽어 온다.
 def get_split_angle():
     from compute_contact import _SPLIT_ANGLE_DEG
+
     return _SPLIT_ANGLE_DEG
 
 
@@ -253,29 +304,46 @@ def main():
     )
     parser.add_argument("--name", default="s0_train")
     parser.add_argument(
-        "--ycb_id", type=int, nargs="+", default=[1],
+        "--ycb_id",
+        type=int,
+        nargs="+",
+        default=[1],
         help="object id(s) to process; pass 0 (alone) to do every object in the json",
     )
-    parser.add_argument("--params", default=_PARAMS_JSON,
-                        help="ycb_object_params.json with per-object mass_kg / mu")
-    parser.add_argument("--stride", type=int, default=1,
-                        help="frame stride per sequence (1 = every frame; raise to subsample)")
+    parser.add_argument(
+        "--params",
+        default=_PARAMS_JSON,
+        help="ycb_object_params.json with per-object mass_kg / mu",
+    )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=1,
+        help="frame stride per sequence (1 = every frame; raise to subsample)",
+    )
     parser.add_argument("--thresh", type=float, default=0.005)
     parser.add_argument("--min_verts", type=int, default=3)
     parser.add_argument("--friction", choices=["1d", "2d"], default="2d")
     parser.add_argument(
-        "--no_torque", dest="torque", action="store_false",
+        "--no_torque",
+        dest="torque",
+        action="store_false",
         help="disable torque equilibrium (force-only).",
     )
     parser.set_defaults(torque=True)
     parser.add_argument(
-        "--solved_only", action="store_true",
+        "--solved_only",
+        action="store_true",
         help="store only frames with a feasible grasp solve (default: also store "
         "hand+object-present frames that did not solve, tagged with their status, "
         "so the renderer decides what to draw).",
     )
-    parser.add_argument("--max_seqs", type=int, default=0,
-                        help="limit sequences per object for a quick run (0 = all)")
+    parser.add_argument(
+        "--max_seqs",
+        type=int,
+        default=0,
+        help="limit sequences per object for a quick run (0 = all)",
+    )
     parser.add_argument("--out_dir", default=_DEFAULT_OUT_DIR)
     args = parser.parse_args()
 
@@ -299,16 +367,30 @@ def main():
             print("  no usable frames for %s; nothing saved" % params["model"])
             continue
         out_path = os.path.join(args.out_dir, "%s.npz" % params["model"])
-        save_pressure_npz(out_path, ycb_id, dataset.ycb_classes[ycb_id], params,
-                          args, F, C, skip, n_solved, n_stored)
+        save_pressure_npz(
+            out_path,
+            ycb_id,
+            dataset.ycb_classes[ycb_id],
+            params,
+            args,
+            F,
+            C,
+            skip,
+            n_solved,
+            n_stored,
+        )
         written.append((out_path, n_solved, n_stored, len(C["fn"])))
-        print("  wrote %d frames (%d solved) / %d contacts -> %s (skip %s)"
-              % (n_stored, n_solved, len(C["fn"]), out_path, skip))
+        print(
+            "  wrote %d frames (%d solved) / %d contacts -> %s (skip %s)"
+            % (n_stored, n_solved, len(C["fn"]), out_path, skip)
+        )
 
     print("\n=== done: %d object file(s) ===" % len(written))
     for p, ns, nst, nc in written:
-        print("  %-55s  %5d frames (%5d solved)  %6d contacts"
-              % (os.path.basename(p), nst, ns, nc))
+        print(
+            "  %-55s  %5d frames (%5d solved)  %6d contacts"
+            % (os.path.basename(p), nst, ns, nc)
+        )
 
 
 if __name__ == "__main__":

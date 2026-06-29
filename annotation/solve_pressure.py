@@ -194,10 +194,19 @@ def solve_min_effort(
         cp.Minimize(cp.sum_squares(fn) + cp.sum_squares(ft1) + cp.sum_squares(ft2)),
         constraints,
     )
-    prob.solve(solver=cp.ECOS)
-    if prob.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
-        return None, None, None, prob.status
-    return fn.value, ft1.value, ft2.value, prob.status
+    # ECOS는 가끔 수치적으로 까다로운 frame에서 OPTIMAL 대신 SolverError 예외를 던진다.
+    # 그 frame 하나 때문에 전체 run이 죽지 않도록 잡아서 SCS로 한 번 재시도하고,
+    # 그래도 안 풀리면 (None, "solver_error")로 돌려 해당 frame만 건너뛰게 한다.
+    status = "solver_error"
+    for solver in (cp.ECOS, cp.SCS):
+        try:
+            prob.solve(solver=solver)
+        except cp.error.SolverError:
+            continue
+        status = prob.status
+        if status in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+            return fn.value, ft1.value, ft2.value, status
+    return None, None, None, status
 
 
 # 한 frame의 contact→SOCP. 풀리면 (kept, fn,ft1,ft2, normals,t1,t2, pressures, n_support),
@@ -246,7 +255,8 @@ def solve_frame(
         normals, t1s, t2s, g_cam, mass, mu, friction, arms=arms, torque=torque
     )
     if fn is None:
-        return None, "infeasible"
+        # status: cvxpy 상태('infeasible' 등) 또는 'solver_error'(ECOS/SCS 모두 실패).
+        return None, status
     areas = np.array([c["area_m2"] for c in kept])
     pressures = fn / areas
     return (kept, fn, ft1, ft2, normals, t1s, t2s, pressures, n_support), status

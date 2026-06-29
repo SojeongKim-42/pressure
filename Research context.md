@@ -83,8 +83,26 @@ cracker box(평면) 외 곡면 물체로 확장 시작. 첫 대상은 **can(002_
 - **★split-threshold sweep (sweep_split_angle.py, 9개 물체: box 3/can 3/bowl·mug·bottle):** T를 10~90° sweep하며 ① 손가락당 patch 수 ② patch 공간지름[cm] ③ within-patch P90 spread ④ resultant R 측정. **T=20°에서 patch 공간지름이 모든 물체에서 ~1.5-2.2cm(손가락 패드 한 개)로 수렴**하고 within-patch R≈0.99·P90 spread<10°. T<15°는 패드를 쪼개는 과분할(area artifact 시작), T>40°는 패드를 넘겨 wrap을 한 덩어리로 묶음. box는 평면이라 T에 둔감(cracker 20°/30° 사실상 동일). R 단독은 너무 관대(~55-60°까지 0.95↑)라 binding이 아니고, **진짜 기준은 patch 공간크기≈패드(~2cm)**. → **`_SPLIT_ANGLE_DEG`를 30°→20°로 전 물체 통일**(compute_contact.py; contact/pressure 전 파이프라인에 전파). 단 20°는 YCB 곡률대(반경 3-7cm)에서 2cm에 정렬된 값이라, 곡률이 크게 다른 물체엔 "지름 2cm 초과 시 추가 분할" 같은 공간크기 가드가 필요(미구현).
 - 산출물: `vis/contact/normal_spread_<obj>.{png,npz}`, `vis/contact/split_sweep.{png,npz}`.
 
+### [검증 A] OpenTouch 손가락별 분포 sanity check (2026-06-28, 완료)
+
+외부 데이터셋 OpenTouch(egocentric in-the-wild, RGB+hand-pose+tactile glove)로 **분포-shape sanity check** 수행. OpenTouch는 절대 kPa로 변환 불가(uncalibrated, raw 0–3072, force-positive 단조)지만 raw가 force에 단조비례한다는 가정 하에 **손가락별 상대 share(분포 shape)** 비교는 가능. ※ under-grip(과소추정) *magnitude*는 검증 못 함 — 그건 "calibrated 절대힘 + 중력-holding" 조합 필요(OpenTouch=calib 없음, PiMForce=holding task 없음).
+
+- **방법.** (물리) `pressure_labels/003_cracker_box.npz` 1,450 solved 프레임에서 contact별 `fn`(N)을 손가락별 합산→정규화. (OpenTouch) taxel(16×16)→`mano_vid`(subdiv MANO vert)→nearest neutral-778 vert→**물리와 동일한 `_PART_TO_FINGER`** 로 taxel당 finger 분수 가중치(`handLayoutNewest_meshid.json`+`mano_right_neutral{,_subdiv}.obj`). grip_type별 clip의 `right_pressure[peak] − per-taxel 10%ile resting`(≥0) raw를 손가락별 합산·정규화. 28 grip_type / 2,501 clip. (스크립트는 `$CLAUDE_JOB_DIR/tmp`의 1회성 분석 — 본 repo 미커밋.)
+- **★발견 1 — 큰 구조 일치(검증됨).** 두 쪽 모두 **엄지 지배 + thumb>index>middle 순서 + thumb ≈ radial(index+middle) 대향**. box power-grasp에 가까운 wrap 계열(Medium Wrap 등) cos 유사도 0.87–0.94. min-effort SOCP의 thumb/radial 배분이 실제 grasp과 거의 동일 — 평형이 만드는 진짜 서명이라 신뢰 보강.
+- **★발견 2 — ulnar→palm "자리바꿈"(한계 노출).** 비-radial 하중 *총량*은 거의 같은데(physics ulnar+palm=0.255 vs Medium Wrap 0.262) *위치*가 다름: 물리는 ring+little **손가락 끝**에 0.243/palm 0.012, 실제 글러브는 ulnar 0.02–0.06/**palm 0.10–0.21**. 즉 물리가 wrap의 손바닥 하중을 ring/little 손가락 vertex로 잘못 국소화. SOCP가 아니라 **geometric contact-detection 단계의 공간 귀속 오류**로 추정(총 ulnar-side 힘은 맞음). 모든 grip(파워 wrap 포함)에서 ulnar 손가락 share가 ~0.02–0.06로 일관 → 센서 쪽 ulnar 둔감 가능성도 일부 있으나 palm 우세가 dominant.
+
+  | (share) | thumb | radial(idx+mid) | ulnar(ring+lit) | palm | cos6 |
+  |---|---|---|---|---|---|
+  | **PHYSICS cracker** | 0.390 | 0.356 | 0.243 | 0.012 | — |
+  | Medium Wrap | 0.384 | 0.354 | 0.055 | 0.207 | 0.891 |
+  | Prismatic 4 Finger | 0.477 | 0.372 | 0.024 | 0.128 | 0.923 |
+  | OpenTouch 전체평균 | 0.431 | 0.379 | 0.033 | 0.157 | 0.917 |
+
+- **한계/confound.** object mismatch(물리=box, OT=다양·대개 소물체; Medium Wrap이 최선 대조군); raw 비선형·uncalibrated→share 왜곡; palm taxel 64개 vs 손가락 18개(면적 큼, force proxy로는 타당하나 절대비교 불가); 물리는 L+R 혼합/OT는 R만(라벨은 side-일관). delta(peak−resting) 사용으로 donning-saturation taxel은 ~0 기여 → palm은 오히려 과소계상(palm 발견은 보수적).
+
 ### [다음 단계] (미착수)
 
+- (검증 A 후속) ulnar→palm 자리바꿈이 contact-detection의 어느 단계에서 생기는지 규명; 다른 YCB 물체도 물리 계산해 grip-type 대조군 확대.
 - can으로 contact/pressure 계산 + normal 저장 실행(다음 작업). 이후 bowl(ycb_id=13, COM 보정 필요).
 - cracker box 전체에 대해 SOCP infeasibility/support-제외 rate를 정량 측정(현재 비디오는 skip만 카운트). torque ON/OFF infeasibility 차이도 포함.
 - contact area 정의(threshold)에 따른 pressure 스케일 보정 검토 (문제 #5).
